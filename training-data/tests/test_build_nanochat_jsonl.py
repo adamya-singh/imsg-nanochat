@@ -191,6 +191,44 @@ def load_pairs(path: Path) -> list[list[dict[str, str]]]:
     ]
 
 
+def test_recover_attributed_text_keeps_clean_plain_text() -> None:
+    recovered = build_nanochat_jsonl.recover_attributed_text(b"meta\x00dont forget lunch")
+    assert recovered == "dont forget lunch"
+
+
+def test_recover_attributed_text_filters_streamtyped_archive_noise() -> None:
+    blob = (
+        b"streamtyped\x00NSAttributedString\x00Hopefully that is enough cuz im doing that"
+        b"\x00NSDictionary\x00__kIMMessagePartAttributeName"
+    )
+    recovered = build_nanochat_jsonl.recover_attributed_text(blob)
+    assert recovered == "Hopefully that is enough cuz im doing that"
+
+
+def test_recover_attributed_text_keeps_human_text_from_mixed_metadata_blob() -> None:
+    blob = (
+        b"NSMutableAttributedString\x00Yo do you know what the Lin Alg midterm is on"
+        b"\x00NSKeyedArchiver\x00NSData"
+    )
+    recovered = build_nanochat_jsonl.recover_attributed_text(blob)
+    assert recovered == "Yo do you know what the Lin Alg midterm is on"
+
+
+def test_recover_attributed_text_keeps_phone_number_but_not_metadata() -> None:
+    blob = b"__kIMPhoneNumberAttributeName\x00+1 (239) 919-0969\x00NSURL\x00NSData"
+    recovered = build_nanochat_jsonl.recover_attributed_text(blob)
+    assert recovered == "+1 (239) 919-0969"
+
+
+def test_recover_attributed_text_rejects_low_confidence_noise_blob() -> None:
+    blob = (
+        b"streamtyped\x00NSAttributedString\x00NSDictionary\x00NSNumber\x00NSData"
+        b"\x00NSURL\x00__kIMMessagePartAttributeName"
+    )
+    recovered = build_nanochat_jsonl.recover_attributed_text(blob)
+    assert recovered == ""
+
+
 def test_build_dataset_filters_and_formats(tmp_path: Path) -> None:
     db_path = tmp_path / "chat.db"
     create_fixture_db(db_path)
@@ -216,6 +254,10 @@ def test_build_dataset_filters_and_formats(tmp_path: Path) -> None:
     assert "+15550000002" not in rendered
     assert "verification code" not in rendered.lower()
     assert "same prompt" not in rendered
+    assert "streamtyped" not in rendered
+    assert "NSAttributedString" not in rendered
+    assert "__kIMMessagePartAttributeName" not in rendered
+    assert "bplist00" not in rendered
 
 
 def test_turn_building_respects_merge_gap(tmp_path: Path) -> None:
@@ -250,6 +292,28 @@ def test_write_jsonl_is_deterministic(tmp_path: Path) -> None:
     build_nanochat_jsonl.write_jsonl(pairs, out_b)
 
     assert out_a.read_text(encoding="utf-8") == out_b.read_text(encoding="utf-8")
+
+
+def test_format_stats_includes_extraction_counters() -> None:
+    stats = build_nanochat_jsonl.ExtractionStats(
+        rows_using_message_text=10,
+        rows_using_attributed_body=2,
+        rows_dropped_low_confidence_attributed=3,
+        rows_dropped_reaction_or_effect=4,
+        rows_dropped_media_only=5,
+        rows_dropped_empty_text=6,
+        pairs_dropped_junk=7,
+    )
+
+    rendered = build_nanochat_jsonl.format_stats(stats)
+
+    assert "message.text=10" in rendered
+    assert "clean_attributedBody=2" in rendered
+    assert "low_confidence_attributed_dropped=3" in rendered
+    assert "reaction_or_effect_dropped=4" in rendered
+    assert "media_only_dropped=5" in rendered
+    assert "empty_text_dropped=6" in rendered
+    assert "junk_pairs_dropped=7" in rendered
 
 
 def test_cli_and_customjson_schema_validation(tmp_path: Path) -> None:

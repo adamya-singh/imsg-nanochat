@@ -15,7 +15,7 @@ import plistlib
 import random
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -26,6 +26,22 @@ PRINTABLE_TEXT_RE = re.compile(rb"[ -~\t\r\n]{2,}")
 BLANK_LINES_RE = re.compile(r"\n{3,}")
 DEFAULT_CONFIG_PATH = Path("training-data/config/extraction_config.json")
 EXAMPLE_CONFIG_PATH = Path("training-data/config/extraction_config.example.json")
+ARCHIVE_MARKERS = (
+    "streamtyped",
+    "bplist",
+    "nsattributedstring",
+    "nsmutableattributedstring",
+    "nsstring",
+    "nsmutablestring",
+    "nsdictionary",
+    "nsdict",
+    "nsnumber",
+    "nsdata",
+    "nsurl",
+    "__kim",
+    "ns.objects",
+    "nskeyedarchiver",
+)
 
 JUNK_PATTERNS = [
     re.compile(r"(?i)\b(?:verification|security|pass|login|otp)\s*code\b"),
@@ -78,6 +94,18 @@ class Turn:
     text: str
 
 
+@dataclass
+class ExtractionStats:
+    rows_using_message_text: int = 0
+    rows_using_attributed_body: int = 0
+    rows_dropped_low_confidence_attributed: int = 0
+    rows_dropped_reaction_or_effect: int = 0
+    rows_dropped_media_only: int = 0
+    rows_dropped_empty_text: int = 0
+    pairs_dropped_junk: int = 0
+    debug_notes: list[str] = field(default_factory=list)
+
+
 def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
     return {row[1] for row in rows}
@@ -123,6 +151,67 @@ def text_score(candidate: str) -> tuple[int, int]:
     return (visible, len(cleaned))
 
 
+def control_character_ratio(candidate: str) -> float:
+    if not candidate:
+        return 1.0
+    disallowed = sum(1 for ch in candidate if ord(ch) < 32 and ch not in "\t\r\n")
+    return disallowed / len(candidate)
+
+
+def archive_marker_hits(candidate: str) -> int:
+    lower = candidate.lower()
+    return sum(1 for marker in ARCHIVE_MARKERS if marker in lower)
+
+
+def is_human_text_candidate(candidate: str) -> bool:
+    normalized = normalize_text(candidate)
+    if not normalized:
+        return False
+
+    lower = normalized.lower()
+    if archive_marker_hits(normalized) > 0:
+        return False
+    if control_character_ratio(normalized) > 0:
+        return False
+    if len(normalized) < 2:
+        return False
+
+    visible = sum(ch.isprintable() and not ch.isspace() for ch in normalized)
+    if visible < 2:
+        return False
+
+    alpha_num = sum(ch.isalnum() for ch in normalized)
+    if alpha_num == 0:
+        return False
+
+    weird_punctuation = sum(ch in "{}[]<>|\\^~" for ch in normalized)
+    if weird_punctuation > 2:
+        return False
+
+    if lower.startswith(("ns", "__k", "ddscannerresult", "relativeday")):
+        return False
+
+    return True
+
+
+def candidate_score(candidate: str) -> tuple[int, int, int]:
+    normalized = normalize_text(candidate)
+    alpha_num = sum(ch.isalnum() for ch in normalized)
+    spaces = sum(ch.isspace() for ch in normalized)
+    return (alpha_num, spaces, -len(normalized))
+
+
+def select_best_candidate(candidates: Iterable[str]) -> str:
+    filtered = []
+    for candidate in candidates:
+        normalized = normalize_text(candidate)
+        if is_human_text_candidate(normalized):
+            filtered.append(normalized)
+    if not filtered:
+        return ""
+    return max(filtered, key=candidate_score)
+
+
 def extract_printable_candidates(blob: bytes) -> list[str]:
     candidates: list[str] = []
 
@@ -131,19 +220,6 @@ def extract_printable_candidates(blob: bytes) -> list[str]:
         normalized = normalize_text(decoded)
         if normalized:
             candidates.append(normalized)
-
-    blob_no_null = blob.replace(b"\x00", b"")
-    if blob_no_null:
-        decoded = normalize_text(blob_no_null.decode("utf-8", errors="ignore"))
-        if decoded:
-            candidates.append(decoded)
-
-    try:
-        decoded_utf16 = normalize_text(blob.decode("utf-16-le", errors="ignore"))
-        if decoded_utf16:
-            candidates.append(decoded_utf16)
-    except UnicodeDecodeError:
-        pass
 
     return candidates
 
@@ -159,32 +235,20 @@ def recover_attributed_text(value: object) -> str:
         return ""
 
     blob = bytes(value)
-    candidates: list[str] = []
+    structured_candidates: list[str] = []
 
     try:
         parsed = plistlib.loads(blob)
-        candidates.extend(recursively_extract_strings(parsed))
+        structured_candidates.extend(recursively_extract_strings(parsed))
     except Exception:
         pass
 
-    candidates.extend(extract_printable_candidates(blob))
+    structured_text = select_best_candidate(structured_candidates)
+    if structured_text:
+        return structured_text
 
-    filtered: list[str] = []
-    for candidate in candidates:
-        normalized = normalize_text(candidate)
-        if not normalized:
-            continue
-        lower = normalized.lower()
-        if lower in {"nsstring", "nsdict", "nsdictionary", "nsnumber"}:
-            continue
-        if "__kimmattributed" in lower:
-            continue
-        filtered.append(normalized)
-
-    if not filtered:
-        return ""
-
-    return max(filtered, key=text_score)
+    raw_candidates = extract_printable_candidates(blob)
+    return select_best_candidate(raw_candidates)
 
 
 def apple_time_to_unix(raw_value: object) -> float:
@@ -343,6 +407,7 @@ def load_config(config_path: Path) -> ExtractionConfig:
 def extract_message_rows(
     conn: sqlite3.Connection,
     chats: Sequence[ChatInfo],
+    stats: ExtractionStats | None = None,
 ) -> list[MessageRow]:
     if not chats:
         return []
@@ -424,15 +489,32 @@ def extract_message_rows(
     for chat in chats:
         for row in conn.execute(query, (chat.chat_id,)):
             if is_effect_or_reaction(row):
+                if stats is not None:
+                    stats.rows_dropped_reaction_or_effect += 1
                 continue
 
             text = normalize_text(row["text"]) if row["text"] else ""
-            if not text:
-                text = recover_attributed_text(row["attributed_body"])
-            if not text:
-                continue
+            text_from_message = bool(text)
+            if text_from_message:
+                if stats is not None:
+                    stats.rows_using_message_text += 1
+            else:
+                recovered_text = recover_attributed_text(row["attributed_body"])
+                if recovered_text:
+                    text = recovered_text
+                    if stats is not None:
+                        stats.rows_using_attributed_body += 1
+                else:
+                    if stats is not None and row["attributed_body"] is not None:
+                        stats.rows_dropped_low_confidence_attributed += 1
+                        stats.rows_dropped_empty_text += 1
+                    elif stats is not None:
+                        stats.rows_dropped_empty_text += 1
+                    continue
             if row["has_attachment"] and not normalize_text(row["text"]):
                 # Media-only rows with no ordinary text are excluded.
+                if stats is not None:
+                    stats.rows_dropped_media_only += 1
                 continue
 
             rows.append(
@@ -510,7 +592,7 @@ def render_pair(contact_label: str, inbound_text: str, reply_text: str) -> list[
     ]
 
 
-def build_reply_pairs(turns: Sequence[Turn]) -> list[list[dict[str, str]]]:
+def build_reply_pairs(turns: Sequence[Turn], stats: ExtractionStats | None = None) -> list[list[dict[str, str]]]:
     pairs: list[list[dict[str, str]]] = []
     i = 0
     while i < len(turns) - 1:
@@ -528,6 +610,8 @@ def build_reply_pairs(turns: Sequence[Turn]) -> list[list[dict[str, str]]]:
         if inbound_text and reply_text:
             if not looks_like_junk_text(inbound_text) and not looks_like_junk_text(reply_text):
                 pairs.append(render_pair(current.contact_label, inbound_text, reply_text))
+            elif stats is not None:
+                stats.pairs_dropped_junk += 1
         i += 1
 
     return pairs
@@ -557,6 +641,7 @@ def apply_contact_minimum(
 def build_dataset(
     db_path: Path,
     config: ExtractionConfig,
+    stats: ExtractionStats | None = None,
 ) -> list[list[dict[str, str]]]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -564,12 +649,12 @@ def build_dataset(
         chats = get_one_to_one_chats(conn)
         chats = exclude_chats(chats, config.excluded_contact_labels)
         chats = select_chats(chats, limit_chats=config.limit_chats, seed=config.seed)
-        rows = extract_message_rows(conn, chats)
+        rows = extract_message_rows(conn, chats, stats=stats)
     finally:
         conn.close()
 
     turns = build_turns(rows, merge_gap_seconds=config.merge_gap_seconds)
-    pairs = build_reply_pairs(turns)
+    pairs = build_reply_pairs(turns, stats=stats)
     pairs = dedupe_pairs(pairs)
     pairs = apply_contact_minimum(pairs, min_contact_pairs=config.min_contact_pairs)
     return pairs
@@ -633,6 +718,19 @@ def resolve_config(args: argparse.Namespace, default_config: ExtractionConfig) -
     )
 
 
+def format_stats(stats: ExtractionStats) -> str:
+    return (
+        "Extraction stats: "
+        f"message.text={stats.rows_using_message_text}, "
+        f"clean_attributedBody={stats.rows_using_attributed_body}, "
+        f"low_confidence_attributed_dropped={stats.rows_dropped_low_confidence_attributed}, "
+        f"reaction_or_effect_dropped={stats.rows_dropped_reaction_or_effect}, "
+        f"media_only_dropped={stats.rows_dropped_media_only}, "
+        f"empty_text_dropped={stats.rows_dropped_empty_text}, "
+        f"junk_pairs_dropped={stats.pairs_dropped_junk}"
+    )
+
+
 def main() -> int:
     args = parse_args()
     db_path = Path(args.db_path)
@@ -649,10 +747,12 @@ def main() -> int:
     if config.limit_chats is not None and config.limit_chats < 1:
         raise ValueError("--limit-chats must be >= 1 when provided")
 
-    pairs = build_dataset(db_path=db_path, config=config)
+    stats = ExtractionStats()
+    pairs = build_dataset(db_path=db_path, config=config, stats=stats)
     write_jsonl(pairs, output_path)
 
     print(f"Wrote {len(pairs)} reply pairs to {output_path}")
+    print(format_stats(stats))
     return 0
 
 

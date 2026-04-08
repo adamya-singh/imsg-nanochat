@@ -3,7 +3,7 @@
 Workspace for data extraction, cleaning, review, and final training artifacts.
 
 ## Current Progress
-The wrapper repo currently has one implemented data-preparation path: `training-data/scripts/build_nanochat_jsonl.py` converts Apple Messages `chat.db` into reply-only nanochat JSONL. The extractor is driven by a local JSON config file, seeded from a checked-in example config, and supports explicit per-chat exclusion through `excluded_contact_labels`.
+The wrapper repo currently has one implemented data-preparation path: `training-data/scripts/build_nanochat_jsonl.py` converts Apple Messages `chat.db` into reply-only nanochat JSONL. The extractor is driven by a local JSON config file, seeded from a checked-in example config, supports explicit per-chat exclusion through `excluded_contact_labels`, and now uses a precision-first `attributedBody` fallback.
 
 ## Implemented Today
 The current implemented pipeline is `training-data/scripts/build_nanochat_jsonl.py`, which converts Apple Messages `chat.db` into reply-only nanochat JSONL.
@@ -75,6 +75,10 @@ CLI flags override the values set in the loaded config file for that run. `exclu
 ```
 
 - Uses `message.text` first, then best-effort plain-text recovery from `attributedBody`.
+- Favors precision over recall when `message.text` is empty:
+  - `message.text` is preferred whenever present.
+  - `attributedBody` is only used when the script can isolate clean human-readable text with high confidence.
+  - uncertain `attributedBody` rows are dropped instead of guessed.
 - Drops group chats, media-only rows, reactions, message effects, and obvious OTP/service noise.
 - Merges consecutive same-speaker texts within 10 minutes into one turn before pairing.
 - Dedupes identical final reply pairs deterministically before writing JSONL.
@@ -85,6 +89,7 @@ The current script and tests verify the following behavior:
 - Only one-to-one chats are considered.
 - Same-speaker messages are merged when they fall within `--merge-gap-seconds`.
 - `attributedBody` is used as a best-effort text fallback when `message.text` is empty.
+- `attributedBody` recovery is precision-first: the extractor rejects Apple archive metadata such as `streamtyped`, `NSAttributedString`, `__kIM...`, and similar serialization noise instead of passing it through.
 - Obvious OTP, verification, service, and other junk-text patterns are excluded.
 - Reactions, message effects, and media-only rows without ordinary text are excluded.
 - Identical final reply pairs are deduped.
@@ -92,7 +97,11 @@ The current script and tests verify the following behavior:
 - Configured `excluded_contact_labels` fully remove matching one-to-one chats from extraction.
 - `--config-path` can switch the script to an alternate JSON config file.
 - CLI values override loaded config values for that invocation.
+- The converter prints extraction stats after each run, including rows using `message.text`, rows using clean `attributedBody`, low-confidence `attributedBody` drops, reaction/effect drops, media-only drops, empty-text drops, and junk-pair drops.
 - The generated JSONL loads cleanly through nanochat's `CustomJSON` task format.
+
+## Notes On Output Size
+Row counts may decrease after extractor cleanup. This is expected when the script prefers clean training text over maximum recovery from noisy `attributedBody` blobs. If the dataset becomes materially smaller after a cleanup change, check `decision_log.md` and the printed extraction stats before assuming the run regressed.
 
 ## Testing
 Run the focused converter tests from the repo root:

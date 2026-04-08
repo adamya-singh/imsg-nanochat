@@ -3,7 +3,7 @@
 ## Summary
 Create a single repository that serves as the long-lived home for the project: planning, raw and processed training data, a local `nanochat/` checkout, evaluation artifacts, and a later `nextjs-frontend/` interface. The first implementation focus is the training pipeline, not the frontend: extract Messages data, convert it into a clean nanochat-compatible dataset, fine-tune a small chat model, and evaluate whether it captures both general style and contact-specific behavior.
 
-This document stays high level and vision-oriented. Detailed step-by-step implementation plans should be created later for each phase, especially data preparation, training, evaluation, and frontend work.
+This document stays high level and vision-oriented. Detailed step-by-step implementation plans should be created later for each phase, especially data preparation, training, evaluation, and frontend work. Concrete tradeoffs and revisit triggers should be recorded in `decision_log.md` so this file can remain focused on roadmap and project direction.
 
 ## Progress So Far
 - Phase 1 is complete: this repo now acts as the wrapper workspace for planning, data prep, evaluation prompts, and the nested `nanochat/` codebase.
@@ -11,6 +11,8 @@ This document stays high level and vision-oriented. Detailed step-by-step implem
 - The currently implemented data path is reply-only. It emits strict two-message nanochat samples with `[MODE: REPLY]` and `[CONTACT: ...]`.
 - The current extractor workflow uses a tracked example config plus a local ignored config file.
 - Specific one-to-one chats can now be fully excluded by exact `contact_label` match through `excluded_contact_labels`.
+- `attributedBody` handling is now precision-first: clean text is kept, but noisy Apple archive payloads are dropped instead of guessed.
+- Wrapper-repo tradeoffs are now tracked separately in `decision_log.md` so roadmap docs stay high level.
 - Later phases remain pending in this wrapper repo: broader privacy/review workflows, richer dataset assembly, cloud training runs, checkpoint evaluation artifacts, and the future frontend.
 
 ## Key Changes
@@ -34,11 +36,12 @@ This document stays high level and vision-oriented. Detailed step-by-step implem
   - merge nearby texts into turns
   - filter system/spam/OTP/automation noise
   - allow explicit per-chat exclusion through editable external extraction config
+  - prefer clean text over maximum `attributedBody` recovery when Apple archive blobs are noisy
   - use minimal redaction at first and leave broader privacy scrubbing/manual review for a later dedicated pass
   - prevent single contacts or self-notes from dominating the dataset
 - Plan the workflow in phases rather than one monolithic build:
   - Phase 1: repo setup and data handling conventions. Status: complete.
-  - Phase 2: extraction and cleaning pipeline from `chat.db`. Status: partially complete through the reply-only converter, external JSON config, example/local config split, and explicit per-chat exclusion.
+  - Phase 2: extraction and cleaning pipeline from `chat.db`. Status: partially complete through the reply-only converter, external JSON config, example/local config split, explicit per-chat exclusion, and precision-first `attributedBody` cleanup.
   - Phase 3: dataset assembly and balancing. Status: pending.
   - Phase 4: nanochat integration and cloud GPU training. Status: pending.
   - Phase 5: checkpoint evaluation and prompt/interface design. Status: pending.
