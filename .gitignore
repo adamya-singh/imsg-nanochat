@@ -1,0 +1,27 @@
+.DS_Store
+.pytest_cache/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite3
+*.db
+*.jsonl
+
+# Private/local training data and generated artifacts
+training-data/raw/**
+training-data/final/**
+!training-data/raw/.gitkeep
+!training-data/final/.gitkeep
+
+# Optional local working areas
+training-data/intermediate/**
+training-data/review/**
+!training-data/intermediate/.gitkeep
+!training-data/review/.gitkeep
+
+# Tooling/cache directories
+nanochat/.pytest_cache/
+nanochat/.venv/
+nanochat/__pycache__/

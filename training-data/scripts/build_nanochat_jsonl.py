@@ -1,0 +1,544 @@
+#!/usr/bin/env python3
+"""
+Convert Apple Messages chat.db into nanochat-compatible JSONL.
+
+The emitted dataset is reply-only and uses strict two-message samples:
+1) user: inbound contact turn with mode/contact headers
+2) assistant: Adamya's direct reply turn
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import plistlib
+import random
+import re
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable, Sequence
+
+
+APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc).timestamp()
+PRINTABLE_TEXT_RE = re.compile(rb"[ -~\t\r\n]{2,}")
+BLANK_LINES_RE = re.compile(r"\n{3,}")
+
+JUNK_PATTERNS = [
+    re.compile(r"(?i)\b(?:verification|security|pass|login|otp)\s*code\b"),
+    re.compile(r"(?i)\bone[- ]time\s+password\b"),
+    re.compile(r"(?i)\buse\s+\d{4,8}\s+(?:as|for)\b"),
+    re.compile(r"(?i)\b\d{4,8}\b.*\b(?:verification|security|pass|login|otp)\b"),
+    re.compile(r"(?i)\b(?:msg|message|messages?)\s*&\s*data rates may apply\b"),
+    re.compile(r"(?i)\breply\s+(?:stop|unsubscribe|cancel|end)\b"),
+    re.compile(r"(?i)\bfree msg:"),
+    re.compile(r"(?i)\bmessage blocking is active\b"),
+    re.compile(r"(?i)\btracking number\b"),
+    re.compile(r"(?i)\bshipment\b.*\b(?:delivered|delivery|tracking)\b"),
+    re.compile(r"(?i)\bnot delivered\b"),
+]
+
+
+@dataclass(frozen=True)
+class ChatInfo:
+    chat_id: int
+    contact_label: str
+
+
+@dataclass(frozen=True)
+class MessageRow:
+    chat_id: int
+    message_id: int
+    timestamp: float
+    is_from_me: bool
+    contact_label: str
+    text: str
+
+
+@dataclass(frozen=True)
+class Turn:
+    chat_id: int
+    contact_label: str
+    is_from_me: bool
+    start_timestamp: float
+    end_timestamp: float
+    message_ids: tuple[int, ...]
+    text: str
+
+
+def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row[1] for row in rows}
+
+
+def choose_handle_label(row: sqlite3.Row) -> str:
+    for key in ("handle_uncanonicalized", "handle_id", "handle_chat_identifier"):
+        value = row[key]
+        if value:
+            return str(value).strip()
+    return f"chat_{row['chat_id']}"
+
+
+def normalize_text(text: str | None) -> str:
+    if text is None:
+        return ""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = BLANK_LINES_RE.sub("\n\n", normalized)
+    return normalized
+
+
+def recursively_extract_strings(value: object) -> list[str]:
+    strings: list[str] = []
+    if isinstance(value, str):
+        strings.append(value)
+    elif isinstance(value, bytes):
+        try:
+            strings.append(value.decode("utf-8"))
+        except UnicodeDecodeError:
+            pass
+    elif isinstance(value, dict):
+        for inner in value.values():
+            strings.extend(recursively_extract_strings(inner))
+    elif isinstance(value, (list, tuple, set)):
+        for inner in value:
+            strings.extend(recursively_extract_strings(inner))
+    return strings
+
+
+def text_score(candidate: str) -> tuple[int, int]:
+    cleaned = normalize_text(candidate)
+    visible = sum(ch.isprintable() and not ch.isspace() for ch in cleaned)
+    return (visible, len(cleaned))
+
+
+def extract_printable_candidates(blob: bytes) -> list[str]:
+    candidates: list[str] = []
+
+    for raw in PRINTABLE_TEXT_RE.findall(blob):
+        decoded = raw.decode("utf-8", errors="ignore")
+        normalized = normalize_text(decoded)
+        if normalized:
+            candidates.append(normalized)
+
+    blob_no_null = blob.replace(b"\x00", b"")
+    if blob_no_null:
+        decoded = normalize_text(blob_no_null.decode("utf-8", errors="ignore"))
+        if decoded:
+            candidates.append(decoded)
+
+    try:
+        decoded_utf16 = normalize_text(blob.decode("utf-16-le", errors="ignore"))
+        if decoded_utf16:
+            candidates.append(decoded_utf16)
+    except UnicodeDecodeError:
+        pass
+
+    return candidates
+
+
+def recover_attributed_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, str):
+        return normalize_text(value)
+    if not isinstance(value, (bytes, bytearray)):
+        return ""
+
+    blob = bytes(value)
+    candidates: list[str] = []
+
+    try:
+        parsed = plistlib.loads(blob)
+        candidates.extend(recursively_extract_strings(parsed))
+    except Exception:
+        pass
+
+    candidates.extend(extract_printable_candidates(blob))
+
+    filtered: list[str] = []
+    for candidate in candidates:
+        normalized = normalize_text(candidate)
+        if not normalized:
+            continue
+        lower = normalized.lower()
+        if lower in {"nsstring", "nsdict", "nsdictionary", "nsnumber"}:
+            continue
+        if "__kimmattributed" in lower:
+            continue
+        filtered.append(normalized)
+
+    if not filtered:
+        return ""
+
+    return max(filtered, key=text_score)
+
+
+def apple_time_to_unix(raw_value: object) -> float:
+    if raw_value in (None, ""):
+        return 0.0
+    value = float(raw_value)
+    magnitude = abs(value)
+    if magnitude > 1e14:
+        delta_seconds = value / 1_000_000_000
+    elif magnitude > 1e11:
+        delta_seconds = value / 1_000_000
+    elif magnitude > 1e9:
+        delta_seconds = value / 1_000
+    else:
+        delta_seconds = value
+    return APPLE_EPOCH + delta_seconds
+
+
+def is_effect_or_reaction(row: sqlite3.Row) -> bool:
+    if row["associated_message_guid"]:
+        return True
+    if row["associated_message_type"] not in (None, 0):
+        return True
+    if row["item_type"] not in (None, 0):
+        return True
+    if row["balloon_bundle_id"]:
+        return True
+    if row["expressive_send_style_id"]:
+        return True
+    return False
+
+
+def looks_like_junk_text(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized:
+        return True
+    return any(pattern.search(normalized) for pattern in JUNK_PATTERNS)
+
+
+def get_one_to_one_chats(conn: sqlite3.Connection) -> list[ChatInfo]:
+    chat_columns = table_columns(conn, "chat")
+    handle_columns = table_columns(conn, "handle")
+
+    if "chat_identifier" in chat_columns:
+        chat_identifier_sql = "chat.chat_identifier AS handle_chat_identifier"
+    else:
+        chat_identifier_sql = "NULL AS handle_chat_identifier"
+
+    if "uncanonicalized_id" in handle_columns:
+        handle_uncanonicalized_sql = "handle.uncanonicalized_id AS handle_uncanonicalized"
+    else:
+        handle_uncanonicalized_sql = "NULL AS handle_uncanonicalized"
+
+    query = f"""
+        SELECT
+            chat.ROWID AS chat_id,
+            handle.id AS handle_id,
+            {handle_uncanonicalized_sql},
+            {chat_identifier_sql}
+        FROM chat
+        JOIN chat_handle_join ON chat_handle_join.chat_id = chat.ROWID
+        JOIN handle ON handle.ROWID = chat_handle_join.handle_id
+        GROUP BY chat.ROWID
+        HAVING COUNT(DISTINCT chat_handle_join.handle_id) = 1
+    """
+
+    chats = [
+        ChatInfo(chat_id=row["chat_id"], contact_label=choose_handle_label(row))
+        for row in conn.execute(query)
+    ]
+    chats.sort(key=lambda chat: (chat.contact_label, chat.chat_id))
+    return chats
+
+
+def select_chats(chats: Sequence[ChatInfo], limit_chats: int | None, seed: int) -> list[ChatInfo]:
+    selected = list(chats)
+    if limit_chats is None or limit_chats >= len(selected):
+        return selected
+
+    rng = random.Random(seed)
+    indices = sorted(rng.sample(range(len(selected)), limit_chats))
+    return [selected[index] for index in indices]
+
+
+def extract_message_rows(
+    conn: sqlite3.Connection,
+    chats: Sequence[ChatInfo],
+) -> list[MessageRow]:
+    if not chats:
+        return []
+
+    message_columns = table_columns(conn, "message")
+    has_attachments_table = bool(
+        conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='message_attachment_join'"
+        ).fetchone()
+    )
+
+    sql_parts = {
+        "text": "m.text AS text" if "text" in message_columns else "NULL AS text",
+        "attributed_body": (
+            "m.attributedBody AS attributed_body"
+            if "attributedBody" in message_columns
+            else "NULL AS attributed_body"
+        ),
+        "associated_message_guid": (
+            "m.associated_message_guid AS associated_message_guid"
+            if "associated_message_guid" in message_columns
+            else "NULL AS associated_message_guid"
+        ),
+        "associated_message_type": (
+            "m.associated_message_type AS associated_message_type"
+            if "associated_message_type" in message_columns
+            else "NULL AS associated_message_type"
+        ),
+        "item_type": "m.item_type AS item_type" if "item_type" in message_columns else "NULL AS item_type",
+        "balloon_bundle_id": (
+            "m.balloon_bundle_id AS balloon_bundle_id"
+            if "balloon_bundle_id" in message_columns
+            else "NULL AS balloon_bundle_id"
+        ),
+        "expressive_send_style_id": (
+            "m.expressive_send_style_id AS expressive_send_style_id"
+            if "expressive_send_style_id" in message_columns
+            else "NULL AS expressive_send_style_id"
+        ),
+        "has_attachment": (
+            "CASE WHEN maj.message_id IS NULL THEN 0 ELSE 1 END AS has_attachment"
+            if has_attachments_table
+            else "0 AS has_attachment"
+        ),
+    }
+
+    attachment_join = ""
+    if has_attachments_table:
+        attachment_join = """
+            LEFT JOIN (
+                SELECT DISTINCT message_id
+                FROM message_attachment_join
+            ) AS maj ON maj.message_id = m.ROWID
+        """
+
+    query = f"""
+        SELECT
+            cmj.chat_id AS chat_id,
+            m.ROWID AS message_id,
+            m.date AS raw_date,
+            COALESCE(m.is_from_me, 0) AS is_from_me,
+            {sql_parts["text"]},
+            {sql_parts["attributed_body"]},
+            {sql_parts["associated_message_guid"]},
+            {sql_parts["associated_message_type"]},
+            {sql_parts["item_type"]},
+            {sql_parts["balloon_bundle_id"]},
+            {sql_parts["expressive_send_style_id"]},
+            {sql_parts["has_attachment"]}
+        FROM message AS m
+        JOIN chat_message_join AS cmj ON cmj.message_id = m.ROWID
+        {attachment_join}
+        WHERE cmj.chat_id = ?
+        ORDER BY m.date ASC, m.ROWID ASC
+    """
+
+    rows: list[MessageRow] = []
+    chat_map = {chat.chat_id: chat.contact_label for chat in chats}
+    for chat in chats:
+        for row in conn.execute(query, (chat.chat_id,)):
+            if is_effect_or_reaction(row):
+                continue
+
+            text = normalize_text(row["text"]) if row["text"] else ""
+            if not text:
+                text = recover_attributed_text(row["attributed_body"])
+            if not text:
+                continue
+            if row["has_attachment"] and not normalize_text(row["text"]):
+                # Media-only rows with no ordinary text are excluded.
+                continue
+
+            rows.append(
+                MessageRow(
+                    chat_id=row["chat_id"],
+                    message_id=row["message_id"],
+                    timestamp=apple_time_to_unix(row["raw_date"]),
+                    is_from_me=bool(row["is_from_me"]),
+                    contact_label=chat_map[chat.chat_id],
+                    text=text,
+                )
+            )
+    rows.sort(key=lambda row: (row.chat_id, row.timestamp, row.message_id))
+    return rows
+
+
+def build_turns(rows: Sequence[MessageRow], merge_gap_seconds: int) -> list[Turn]:
+    turns: list[Turn] = []
+    current: Turn | None = None
+
+    for row in rows:
+        if current is None:
+            current = Turn(
+                chat_id=row.chat_id,
+                contact_label=row.contact_label,
+                is_from_me=row.is_from_me,
+                start_timestamp=row.timestamp,
+                end_timestamp=row.timestamp,
+                message_ids=(row.message_id,),
+                text=row.text,
+            )
+            continue
+
+        same_chat = current.chat_id == row.chat_id
+        same_speaker = current.is_from_me == row.is_from_me
+        within_gap = (row.timestamp - current.end_timestamp) <= merge_gap_seconds
+        if same_chat and same_speaker and within_gap:
+            current = Turn(
+                chat_id=current.chat_id,
+                contact_label=current.contact_label,
+                is_from_me=current.is_from_me,
+                start_timestamp=current.start_timestamp,
+                end_timestamp=row.timestamp,
+                message_ids=current.message_ids + (row.message_id,),
+                text=f"{current.text}\n{row.text}",
+            )
+            continue
+
+        turns.append(current)
+        current = Turn(
+            chat_id=row.chat_id,
+            contact_label=row.contact_label,
+            is_from_me=row.is_from_me,
+            start_timestamp=row.timestamp,
+            end_timestamp=row.timestamp,
+            message_ids=(row.message_id,),
+            text=row.text,
+        )
+
+    if current is not None:
+        turns.append(current)
+    return turns
+
+
+def render_pair(contact_label: str, inbound_text: str, reply_text: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "user",
+            "content": f"[MODE: REPLY]\n[CONTACT: {contact_label}]\n{inbound_text}",
+        },
+        {
+            "role": "assistant",
+            "content": reply_text,
+        },
+    ]
+
+
+def build_reply_pairs(turns: Sequence[Turn]) -> list[list[dict[str, str]]]:
+    pairs: list[list[dict[str, str]]] = []
+    i = 0
+    while i < len(turns) - 1:
+        current = turns[i]
+        nxt = turns[i + 1]
+        if current.chat_id != nxt.chat_id:
+            i += 1
+            continue
+        if current.is_from_me or not nxt.is_from_me:
+            i += 1
+            continue
+
+        inbound_text = normalize_text(current.text)
+        reply_text = normalize_text(nxt.text)
+        if inbound_text and reply_text:
+            if not looks_like_junk_text(inbound_text) and not looks_like_junk_text(reply_text):
+                pairs.append(render_pair(current.contact_label, inbound_text, reply_text))
+        i += 1
+
+    return pairs
+
+
+def dedupe_pairs(pairs: Iterable[list[dict[str, str]]]) -> list[list[dict[str, str]]]:
+    unique: dict[str, list[dict[str, str]]] = {}
+    for pair in pairs:
+        line = json.dumps(pair, ensure_ascii=False, separators=(",", ":"))
+        unique.setdefault(line, pair)
+    return [unique[key] for key in sorted(unique)]
+
+
+def apply_contact_minimum(
+    pairs: Sequence[list[dict[str, str]]],
+    min_contact_pairs: int,
+) -> list[list[dict[str, str]]]:
+    counts: dict[str, int] = {}
+    for pair in pairs:
+        header = pair[0]["content"].splitlines()[1]
+        counts[header] = counts.get(header, 0) + 1
+
+    filtered = [pair for pair in pairs if counts[pair[0]["content"].splitlines()[1]] >= min_contact_pairs]
+    return filtered
+
+
+def build_dataset(
+    db_path: Path,
+    merge_gap_seconds: int,
+    min_contact_pairs: int,
+    seed: int,
+    limit_chats: int | None = None,
+) -> list[list[dict[str, str]]]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        chats = select_chats(get_one_to_one_chats(conn), limit_chats=limit_chats, seed=seed)
+        rows = extract_message_rows(conn, chats)
+    finally:
+        conn.close()
+
+    turns = build_turns(rows, merge_gap_seconds=merge_gap_seconds)
+    pairs = build_reply_pairs(turns)
+    pairs = dedupe_pairs(pairs)
+    pairs = apply_contact_minimum(pairs, min_contact_pairs=min_contact_pairs)
+    return pairs
+
+
+def write_jsonl(pairs: Sequence[list[dict[str, str]]], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        for pair in pairs:
+            handle.write(json.dumps(pair, ensure_ascii=False, separators=(",", ":")))
+            handle.write("\n")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Convert Apple Messages chat.db into nanochat JSONL.")
+    parser.add_argument("--db-path", required=True, help="Path to Apple Messages chat.db")
+    parser.add_argument("--output-path", required=True, help="Path to write the nanochat JSONL file")
+    parser.add_argument("--min-contact-pairs", type=int, default=5, help="Minimum usable reply pairs required per contact")
+    parser.add_argument("--merge-gap-seconds", type=int, default=600, help="Merge same-speaker messages within this many seconds")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed used for deterministic chat limiting")
+    parser.add_argument("--limit-chats", type=int, default=None, help="Optional max number of 1:1 chats to process for debugging")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    db_path = Path(args.db_path)
+    output_path = Path(args.output_path)
+
+    if not db_path.exists():
+        raise FileNotFoundError(f"chat.db not found: {db_path}")
+    if args.min_contact_pairs < 1:
+        raise ValueError("--min-contact-pairs must be >= 1")
+    if args.merge_gap_seconds < 0:
+        raise ValueError("--merge-gap-seconds must be >= 0")
+    if args.limit_chats is not None and args.limit_chats < 1:
+        raise ValueError("--limit-chats must be >= 1 when provided")
+
+    pairs = build_dataset(
+        db_path=db_path,
+        merge_gap_seconds=args.merge_gap_seconds,
+        min_contact_pairs=args.min_contact_pairs,
+        seed=args.seed,
+        limit_chats=args.limit_chats,
+    )
+    write_jsonl(pairs, output_path)
+
+    print(f"Wrote {len(pairs)} reply pairs to {output_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
