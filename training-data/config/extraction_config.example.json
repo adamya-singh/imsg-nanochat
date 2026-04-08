@@ -1,0 +1,7 @@
+{
+  "min_contact_pairs": 5,
+  "merge_gap_seconds": 600,
+  "seed": 42,
+  "limit_chats": null,
+  "excluded_contact_labels": []
+}

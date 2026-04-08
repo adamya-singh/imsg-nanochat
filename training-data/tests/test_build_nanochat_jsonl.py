@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "training-data" / "scripts" / "build_nanochat_jsonl.py"
+EXAMPLE_CONFIG_PATH = REPO_ROOT / "training-data" / "config" / "extraction_config.example.json"
 
 spec = importlib.util.spec_from_file_location("build_nanochat_jsonl", SCRIPT_PATH)
 build_nanochat_jsonl = importlib.util.module_from_spec(spec)
@@ -196,7 +197,7 @@ def test_build_dataset_filters_and_formats(tmp_path: Path) -> None:
 
     pairs = build_nanochat_jsonl.build_dataset(
         db_path=db_path,
-        config=build_nanochat_jsonl.DEFAULT_CONFIG,
+        config=build_nanochat_jsonl.load_config(EXAMPLE_CONFIG_PATH),
     )
 
     assert len(pairs) == 6
@@ -243,7 +244,7 @@ def test_write_jsonl_is_deterministic(tmp_path: Path) -> None:
 
     pairs = build_nanochat_jsonl.build_dataset(
         db_path=db_path,
-        config=build_nanochat_jsonl.DEFAULT_CONFIG,
+        config=build_nanochat_jsonl.load_config(EXAMPLE_CONFIG_PATH),
     )
     build_nanochat_jsonl.write_jsonl(pairs, out_a)
     build_nanochat_jsonl.write_jsonl(pairs, out_b)
@@ -259,7 +260,7 @@ def test_cli_and_customjson_schema_validation(tmp_path: Path) -> None:
     # Call the module entrypoint directly through build_dataset/write_jsonl so the test stays isolated.
     pairs = build_nanochat_jsonl.build_dataset(
         db_path=db_path,
-        config=build_nanochat_jsonl.DEFAULT_CONFIG,
+        config=build_nanochat_jsonl.load_config(EXAMPLE_CONFIG_PATH),
     )
     build_nanochat_jsonl.write_jsonl(pairs, output_path)
     loaded_pairs = load_pairs(output_path)
@@ -306,17 +307,24 @@ def test_excluded_contact_does_not_appear_in_results(tmp_path: Path) -> None:
     assert "+15550000002" not in rendered
 
 
-def test_default_config_has_no_excluded_contact_labels(tmp_path: Path) -> None:
+def test_example_json_config_matches_expected_defaults(tmp_path: Path) -> None:
     db_path = tmp_path / "chat.db"
     create_fixture_db(db_path)
+    config = build_nanochat_jsonl.load_config(EXAMPLE_CONFIG_PATH)
 
     pairs = build_nanochat_jsonl.build_dataset(
         db_path=db_path,
-        config=build_nanochat_jsonl.DEFAULT_CONFIG,
+        config=config,
     )
 
     assert len(pairs) == 6
-    assert build_nanochat_jsonl.DEFAULT_CONFIG.excluded_contact_labels == ()
+    assert config == build_nanochat_jsonl.ExtractionConfig(
+        min_contact_pairs=5,
+        merge_gap_seconds=600,
+        seed=42,
+        limit_chats=None,
+        excluded_contact_labels=(),
+    )
 
 
 def test_cli_values_override_default_config() -> None:
@@ -341,3 +349,115 @@ def test_cli_values_override_default_config() -> None:
     assert resolved.seed == 42
     assert resolved.limit_chats == 1
     assert resolved.excluded_contact_labels == ("+15550000001",)
+
+
+def test_load_config_from_alternate_path(tmp_path: Path) -> None:
+    config_path = tmp_path / "alt_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "min_contact_pairs": 4,
+                "merge_gap_seconds": 120,
+                "seed": 99,
+                "limit_chats": 2,
+                "excluded_contact_labels": ["+15550000002"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = build_nanochat_jsonl.load_config(config_path)
+
+    assert config == build_nanochat_jsonl.ExtractionConfig(
+        min_contact_pairs=4,
+        merge_gap_seconds=120,
+        seed=99,
+        limit_chats=2,
+        excluded_contact_labels=("+15550000002",),
+    )
+
+
+def test_resolve_config_works_with_cli_config_path() -> None:
+    args = argparse.Namespace(
+        config_path="training-data/config/extraction_config.json",
+        min_contact_pairs=None,
+        merge_gap_seconds=120,
+        seed=None,
+        limit_chats=None,
+    )
+
+    config_path = EXAMPLE_CONFIG_PATH
+    loaded = build_nanochat_jsonl.load_config(config_path)
+    resolved = build_nanochat_jsonl.resolve_config(args, default_config=loaded)
+
+    assert resolved.merge_gap_seconds == 120
+    assert resolved.min_contact_pairs == 5
+    assert resolved.excluded_contact_labels == ()
+
+
+def test_load_config_rejects_missing_file(tmp_path: Path) -> None:
+    missing_path = tmp_path / "missing.json"
+
+    try:
+        build_nanochat_jsonl.load_config(missing_path)
+    except FileNotFoundError as exc:
+        assert "config file not found" in str(exc)
+        assert "Copy" not in str(exc)
+    else:
+        raise AssertionError("expected FileNotFoundError")
+
+
+def test_load_default_config_path_missing_file_mentions_example(tmp_path: Path) -> None:
+    missing_default = tmp_path / "missing_config.json"
+    example_path = tmp_path / "example_config.json"
+    example_path.write_text("{}", encoding="utf-8")
+
+    old_default = build_nanochat_jsonl.DEFAULT_CONFIG_PATH
+    old_example = build_nanochat_jsonl.EXAMPLE_CONFIG_PATH
+    build_nanochat_jsonl.DEFAULT_CONFIG_PATH = missing_default
+    build_nanochat_jsonl.EXAMPLE_CONFIG_PATH = example_path
+    try:
+        try:
+            build_nanochat_jsonl.load_config(build_nanochat_jsonl.DEFAULT_CONFIG_PATH)
+        except FileNotFoundError as exc:
+            assert f"Copy {example_path} to {missing_default}" in str(exc)
+        else:
+            raise AssertionError("expected FileNotFoundError")
+    finally:
+        build_nanochat_jsonl.DEFAULT_CONFIG_PATH = old_default
+        build_nanochat_jsonl.EXAMPLE_CONFIG_PATH = old_example
+
+
+def test_load_config_rejects_invalid_json(tmp_path: Path) -> None:
+    bad_path = tmp_path / "bad.json"
+    bad_path.write_text("{not-json", encoding="utf-8")
+
+    try:
+        build_nanochat_jsonl.load_config(bad_path)
+    except ValueError as exc:
+        assert "invalid JSON config" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_load_config_rejects_wrong_types(tmp_path: Path) -> None:
+    bad_path = tmp_path / "bad_types.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "min_contact_pairs": "five",
+                "merge_gap_seconds": 600,
+                "seed": 42,
+                "limit_chats": None,
+                "excluded_contact_labels": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        build_nanochat_jsonl.load_config(bad_path)
+    except ValueError as exc:
+        assert "min_contact_pairs must be an integer" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")

@@ -16,6 +16,7 @@ training-data/final/**
 !training-data/final/.gitkeep
 
 # Optional local working areas
+training-data/config/extraction_config.json
 training-data/intermediate/**
 training-data/review/**
 !training-data/intermediate/.gitkeep

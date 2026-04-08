@@ -8,10 +8,9 @@ This repository is the top-level project workspace. The `nanochat/` directory is
 
 ## Current Status
 - The workspace structure is in place.
-- The Apple Messages to nanochat converter is implemented at `training-data/scripts/build_nanochat_jsonl.py`.
-- The converter is covered by focused tests in `training-data/tests/test_build_nanochat_jsonl.py`.
-- The wrapper project currently supports preparing reply-only nanochat JSONL from `chat.db`.
-- The extractor now has an in-script `DEFAULT_CONFIG` section for personal defaults.
+- The Apple Messages to nanochat converter is implemented at `training-data/scripts/build_nanochat_jsonl.py` and covered by focused tests in `training-data/tests/test_build_nanochat_jsonl.py`.
+- The wrapper project currently supports preparing reply-only nanochat JSONL from `chat.db` as strict two-message nanochat samples.
+- The extractor now loads personal defaults from a local `training-data/config/extraction_config.json`, with setup starting from the tracked `training-data/config/extraction_config.example.json`.
 - Specific one-to-one chats can be fully ignored through `excluded_contact_labels`.
 - Downstream model training, evaluation artifacts, and the future frontend are still pending in this wrapper repo.
 
@@ -30,15 +29,15 @@ git submodule update --init --recursive
 
 ## Workflow
 1. Export or copy local message data into `training-data/raw/`.
-2. Optionally edit `DEFAULT_CONFIG` in `training-data/scripts/build_nanochat_jsonl.py` to tune extraction defaults or exclude specific chats with `excluded_contact_labels`.
+2. Copy `training-data/config/extraction_config.example.json` to `training-data/config/extraction_config.json`, then optionally edit it to tune extraction defaults or exclude specific chats with `excluded_contact_labels`.
 3. Run the implemented converter in `training-data/scripts/build_nanochat_jsonl.py` to produce reply-only nanochat JSONL from `chat.db`.
 4. Review outputs and privacy-sensitive samples. This is a manual workflow today, not a finished review toolchain.
 5. Export final nanochat-compatible JSONL files into `training-data/final/`. The directory exists, but no checked-in dataset artifact is included in this repo.
-6. Move the prepared dataset and the `nanochat/` codebase to a GPU node for training. This downstream training loop is still planned, not completed here.
+6. Move the prepared dataset and the `nanochat/` codebase to a later training flow on GPU infrastructure. That downstream loop is still planned, not completed here.
 
 ## Current Layout
 - `project_plan.md`: high-level roadmap and project vision
-- `training-data/`: raw exports, intermediate outputs, review artifacts, final JSONL datasets, prep scripts, and the canonical extraction docs
+- `training-data/`: raw exports, config files, intermediate outputs, review artifacts, final JSONL datasets, prep scripts, and the canonical extraction docs
 - `nanochat/`: nanochat fork tracked as a Git submodule for training and inference experimentation
 - `evaluation-prompts/`: fixed prompts and notes for checkpoint evaluation
 - `nextjs-frontend/`: reserved for a later lightweight interface

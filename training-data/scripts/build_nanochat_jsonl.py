@@ -5,9 +5,6 @@ Convert Apple Messages chat.db into nanochat-compatible JSONL.
 The emitted dataset is reply-only and uses strict two-message samples:
 1) user: inbound contact turn with mode/contact headers
 2) assistant: Adamya's direct reply turn
-
-Edit `DEFAULT_CONFIG` below to set personal extraction defaults, including
-conversation labels to fully exclude from the dataset.
 """
 
 from __future__ import annotations
@@ -27,6 +24,8 @@ from typing import Iterable, Sequence
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc).timestamp()
 PRINTABLE_TEXT_RE = re.compile(rb"[ -~\t\r\n]{2,}")
 BLANK_LINES_RE = re.compile(r"\n{3,}")
+DEFAULT_CONFIG_PATH = Path("training-data/config/extraction_config.json")
+EXAMPLE_CONFIG_PATH = Path("training-data/config/extraction_config.example.json")
 
 JUNK_PATTERNS = [
     re.compile(r"(?i)\b(?:verification|security|pass|login|otp)\s*code\b"),
@@ -56,12 +55,6 @@ class ExtractionConfig:
     seed: int = 42
     limit_chats: int | None = None
     excluded_contact_labels: tuple[str, ...] = ()
-
-
-# Intended edit point for personal extraction defaults and conversation exclusions.
-DEFAULT_CONFIG = ExtractionConfig(
-    excluded_contact_labels=(),
-)
 
 
 @dataclass(frozen=True)
@@ -281,6 +274,70 @@ def exclude_chats(chats: Sequence[ChatInfo], excluded_contact_labels: Sequence[s
     if not excluded:
         return list(chats)
     return [chat for chat in chats if chat.contact_label not in excluded]
+
+
+def _require_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} must be an integer")
+    return value
+
+
+def _require_optional_int(value: object, field_name: str) -> int | None:
+    if value is None:
+        return None
+    return _require_int(value, field_name)
+
+
+def _require_string_list(value: object, field_name: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a JSON array of strings")
+
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field_name} must contain only strings")
+        stripped = item.strip()
+        if stripped:
+            normalized.append(stripped)
+    return tuple(normalized)
+
+
+def load_config(config_path: Path) -> ExtractionConfig:
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        example_hint = ""
+        if config_path == DEFAULT_CONFIG_PATH and EXAMPLE_CONFIG_PATH.exists():
+            example_hint = f" Copy {EXAMPLE_CONFIG_PATH} to {DEFAULT_CONFIG_PATH} and edit it for local use."
+        raise FileNotFoundError(f"config file not found: {config_path}.{example_hint}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON config at {config_path}: {exc.msg}") from exc
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"config root must be a JSON object: {config_path}")
+
+    allowed_keys = {
+        "min_contact_pairs",
+        "merge_gap_seconds",
+        "seed",
+        "limit_chats",
+        "excluded_contact_labels",
+    }
+    unexpected_keys = sorted(set(raw) - allowed_keys)
+    if unexpected_keys:
+        joined = ", ".join(unexpected_keys)
+        raise ValueError(f"unexpected config key(s) in {config_path}: {joined}")
+
+    return ExtractionConfig(
+        min_contact_pairs=_require_int(raw.get("min_contact_pairs", 5), "min_contact_pairs"),
+        merge_gap_seconds=_require_int(raw.get("merge_gap_seconds", 600), "merge_gap_seconds"),
+        seed=_require_int(raw.get("seed", 42), "seed"),
+        limit_chats=_require_optional_int(raw.get("limit_chats"), "limit_chats"),
+        excluded_contact_labels=_require_string_list(
+            raw.get("excluded_contact_labels", []),
+            "excluded_contact_labels",
+        ),
+    )
 
 
 def extract_message_rows(
@@ -531,33 +588,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-path", required=True, help="Path to Apple Messages chat.db")
     parser.add_argument("--output-path", required=True, help="Path to write the nanochat JSONL file")
     parser.add_argument(
+        "--config-path",
+        default=None,
+        help="Path to extractor JSON config; defaults to training-data/config/extraction_config.json",
+    )
+    parser.add_argument(
         "--min-contact-pairs",
         type=int,
         default=None,
-        help="Minimum usable reply pairs required per contact; overrides DEFAULT_CONFIG when passed",
+        help="Minimum usable reply pairs required per contact; overrides config file when passed",
     )
     parser.add_argument(
         "--merge-gap-seconds",
         type=int,
         default=None,
-        help="Merge same-speaker messages within this many seconds; overrides DEFAULT_CONFIG when passed",
+        help="Merge same-speaker messages within this many seconds; overrides config file when passed",
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=None,
-        help="Random seed used for deterministic chat limiting; overrides DEFAULT_CONFIG when passed",
+        help="Random seed used for deterministic chat limiting; overrides config file when passed",
     )
     parser.add_argument(
         "--limit-chats",
         type=int,
         default=None,
-        help="Optional max number of 1:1 chats to process for debugging; overrides DEFAULT_CONFIG when passed",
+        help="Optional max number of 1:1 chats to process for debugging; overrides config file when passed",
     )
     return parser.parse_args()
 
 
-def resolve_config(args: argparse.Namespace, default_config: ExtractionConfig = DEFAULT_CONFIG) -> ExtractionConfig:
+def resolve_config(args: argparse.Namespace, default_config: ExtractionConfig) -> ExtractionConfig:
     return ExtractionConfig(
         min_contact_pairs=(
             default_config.min_contact_pairs if args.min_contact_pairs is None else args.min_contact_pairs
@@ -575,7 +637,8 @@ def main() -> int:
     args = parse_args()
     db_path = Path(args.db_path)
     output_path = Path(args.output_path)
-    config = resolve_config(args)
+    config_path = Path(args.config_path) if args.config_path is not None else DEFAULT_CONFIG_PATH
+    config = resolve_config(args, default_config=load_config(config_path))
 
     if not db_path.exists():
         raise FileNotFoundError(f"chat.db not found: {db_path}")

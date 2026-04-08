@@ -2,6 +2,9 @@
 
 Workspace for data extraction, cleaning, review, and final training artifacts.
 
+## Current Progress
+The wrapper repo currently has one implemented data-preparation path: `training-data/scripts/build_nanochat_jsonl.py` converts Apple Messages `chat.db` into reply-only nanochat JSONL. The extractor is driven by a local JSON config file, seeded from a checked-in example config, and supports explicit per-chat exclusion through `excluded_contact_labels`.
+
 ## Implemented Today
 The current implemented pipeline is `training-data/scripts/build_nanochat_jsonl.py`, which converts Apple Messages `chat.db` into reply-only nanochat JSONL.
 
@@ -13,13 +16,14 @@ This README is the source of truth for the currently implemented extraction inte
 
 ## Intended Structure
 - `raw/`: copied exports such as `chat.db` or safe derived snapshots
+- `config/`: extractor configuration files, including a checked-in example and a local ignored config
 - `intermediate/`: parsed or cleaned outputs that are not final training data
 - `review/`: manual review artifacts, notes, and sampling outputs
 - `final/`: nanochat-compatible JSONL datasets used for training
 - `scripts/`: extraction and cleaning utilities
 
 ## `chat.db` Conversion
-Edit `DEFAULT_CONFIG` in `training-data/scripts/build_nanochat_jsonl.py` to set personal extraction defaults. This is the intended place to maintain your personal extraction settings in one block.
+Copy `training-data/config/extraction_config.example.json` to `training-data/config/extraction_config.json`, then edit the local JSON file to set personal extraction defaults. The example file is tracked; your personal `extraction_config.json` is intended to stay local and ignored by git.
 
 Current configurable values include:
 - `min_contact_pairs`
@@ -33,18 +37,24 @@ Current configurable values include:
 Use the v1 converter to build reply-only nanochat JSONL directly from Apple Messages:
 
 ```bash
+cp training-data/config/extraction_config.example.json training-data/config/extraction_config.json
+
 python training-data/scripts/build_nanochat_jsonl.py \
+  --config-path training-data/config/extraction_config.json \
   --db-path training-data/raw/chat.db \
   --output-path training-data/final/messages_reply_pairs.jsonl
 ```
 
 Optional flags:
+- `--config-path training-data/config/extraction_config.json`
 - `--min-contact-pairs 5`
 - `--merge-gap-seconds 600`
 - `--seed 42`
 - `--limit-chats <int>`
 
-CLI flags override the values set in `DEFAULT_CONFIG` for that run. `excluded_contact_labels` remains controlled through the in-script config block.
+If `--config-path` is omitted, the script loads `training-data/config/extraction_config.json` by default. If that file is missing, the script tells you to copy the example config first.
+
+CLI flags override the values set in the loaded config file for that run. `excluded_contact_labels` remains controlled through the JSON config file.
 
 ## V1 Rules
 - Reads Apple Messages `chat.db` and only keeps one-to-one chats.
@@ -80,7 +90,8 @@ The current script and tests verify the following behavior:
 - Identical final reply pairs are deduped.
 - Contacts below the configured minimum usable pair threshold are dropped.
 - Configured `excluded_contact_labels` fully remove matching one-to-one chats from extraction.
-- CLI values override `DEFAULT_CONFIG` values for that invocation.
+- `--config-path` can switch the script to an alternate JSON config file.
+- CLI values override loaded config values for that invocation.
 - The generated JSONL loads cleanly through nanochat's `CustomJSON` task format.
 
 ## Testing
