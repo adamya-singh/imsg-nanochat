@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import sqlite3
@@ -195,9 +196,7 @@ def test_build_dataset_filters_and_formats(tmp_path: Path) -> None:
 
     pairs = build_nanochat_jsonl.build_dataset(
         db_path=db_path,
-        merge_gap_seconds=600,
-        min_contact_pairs=5,
-        seed=42,
+        config=build_nanochat_jsonl.DEFAULT_CONFIG,
     )
 
     assert len(pairs) == 6
@@ -244,9 +243,7 @@ def test_write_jsonl_is_deterministic(tmp_path: Path) -> None:
 
     pairs = build_nanochat_jsonl.build_dataset(
         db_path=db_path,
-        merge_gap_seconds=600,
-        min_contact_pairs=5,
-        seed=42,
+        config=build_nanochat_jsonl.DEFAULT_CONFIG,
     )
     build_nanochat_jsonl.write_jsonl(pairs, out_a)
     build_nanochat_jsonl.write_jsonl(pairs, out_b)
@@ -262,9 +259,7 @@ def test_cli_and_customjson_schema_validation(tmp_path: Path) -> None:
     # Call the module entrypoint directly through build_dataset/write_jsonl so the test stays isolated.
     pairs = build_nanochat_jsonl.build_dataset(
         db_path=db_path,
-        merge_gap_seconds=600,
-        min_contact_pairs=5,
-        seed=42,
+        config=build_nanochat_jsonl.DEFAULT_CONFIG,
     )
     build_nanochat_jsonl.write_jsonl(pairs, output_path)
     loaded_pairs = load_pairs(output_path)
@@ -281,3 +276,68 @@ def test_cli_and_customjson_schema_validation(tmp_path: Path) -> None:
         assert example["messages"][1]["role"] == "assistant"
     finally:
         sys.path.remove(str(REPO_ROOT / "nanochat"))
+
+
+def test_build_dataset_excludes_configured_contact_labels(tmp_path: Path) -> None:
+    db_path = tmp_path / "chat.db"
+    create_fixture_db(db_path)
+
+    config = build_nanochat_jsonl.ExtractionConfig(
+        excluded_contact_labels=("+15550000001",),
+    )
+    pairs = build_nanochat_jsonl.build_dataset(db_path=db_path, config=config)
+
+    assert pairs == []
+
+
+def test_excluded_contact_does_not_appear_in_results(tmp_path: Path) -> None:
+    db_path = tmp_path / "chat.db"
+    create_fixture_db(db_path)
+
+    config = build_nanochat_jsonl.ExtractionConfig(
+        min_contact_pairs=4,
+        excluded_contact_labels=("+15550000002",),
+    )
+    pairs = build_nanochat_jsonl.build_dataset(db_path=db_path, config=config)
+    rendered = "\n".join(json.dumps(pair) for pair in pairs)
+
+    assert len(pairs) == 6
+    assert "+15550000001" in rendered
+    assert "+15550000002" not in rendered
+
+
+def test_default_config_has_no_excluded_contact_labels(tmp_path: Path) -> None:
+    db_path = tmp_path / "chat.db"
+    create_fixture_db(db_path)
+
+    pairs = build_nanochat_jsonl.build_dataset(
+        db_path=db_path,
+        config=build_nanochat_jsonl.DEFAULT_CONFIG,
+    )
+
+    assert len(pairs) == 6
+    assert build_nanochat_jsonl.DEFAULT_CONFIG.excluded_contact_labels == ()
+
+
+def test_cli_values_override_default_config() -> None:
+    default_config = build_nanochat_jsonl.ExtractionConfig(
+        min_contact_pairs=9,
+        merge_gap_seconds=999,
+        seed=7,
+        limit_chats=2,
+        excluded_contact_labels=("+15550000001",),
+    )
+    args = argparse.Namespace(
+        min_contact_pairs=3,
+        merge_gap_seconds=120,
+        seed=42,
+        limit_chats=1,
+    )
+
+    resolved = build_nanochat_jsonl.resolve_config(args, default_config=default_config)
+
+    assert resolved.min_contact_pairs == 3
+    assert resolved.merge_gap_seconds == 120
+    assert resolved.seed == 42
+    assert resolved.limit_chats == 1
+    assert resolved.excluded_contact_labels == ("+15550000001",)

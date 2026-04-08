@@ -5,6 +5,9 @@ Convert Apple Messages chat.db into nanochat-compatible JSONL.
 The emitted dataset is reply-only and uses strict two-message samples:
 1) user: inbound contact turn with mode/contact headers
 2) assistant: Adamya's direct reply turn
+
+Edit `DEFAULT_CONFIG` below to set personal extraction defaults, including
+conversation labels to fully exclude from the dataset.
 """
 
 from __future__ import annotations
@@ -44,6 +47,21 @@ JUNK_PATTERNS = [
 class ChatInfo:
     chat_id: int
     contact_label: str
+
+
+@dataclass(frozen=True)
+class ExtractionConfig:
+    min_contact_pairs: int = 5
+    merge_gap_seconds: int = 600
+    seed: int = 42
+    limit_chats: int | None = None
+    excluded_contact_labels: tuple[str, ...] = ()
+
+
+# Intended edit point for personal extraction defaults and conversation exclusions.
+DEFAULT_CONFIG = ExtractionConfig(
+    excluded_contact_labels=(),
+)
 
 
 @dataclass(frozen=True)
@@ -256,6 +274,13 @@ def select_chats(chats: Sequence[ChatInfo], limit_chats: int | None, seed: int) 
     rng = random.Random(seed)
     indices = sorted(rng.sample(range(len(selected)), limit_chats))
     return [selected[index] for index in indices]
+
+
+def exclude_chats(chats: Sequence[ChatInfo], excluded_contact_labels: Sequence[str]) -> list[ChatInfo]:
+    excluded = {label.strip() for label in excluded_contact_labels if label.strip()}
+    if not excluded:
+        return list(chats)
+    return [chat for chat in chats if chat.contact_label not in excluded]
 
 
 def extract_message_rows(
@@ -474,23 +499,22 @@ def apply_contact_minimum(
 
 def build_dataset(
     db_path: Path,
-    merge_gap_seconds: int,
-    min_contact_pairs: int,
-    seed: int,
-    limit_chats: int | None = None,
+    config: ExtractionConfig,
 ) -> list[list[dict[str, str]]]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        chats = select_chats(get_one_to_one_chats(conn), limit_chats=limit_chats, seed=seed)
+        chats = get_one_to_one_chats(conn)
+        chats = exclude_chats(chats, config.excluded_contact_labels)
+        chats = select_chats(chats, limit_chats=config.limit_chats, seed=config.seed)
         rows = extract_message_rows(conn, chats)
     finally:
         conn.close()
 
-    turns = build_turns(rows, merge_gap_seconds=merge_gap_seconds)
+    turns = build_turns(rows, merge_gap_seconds=config.merge_gap_seconds)
     pairs = build_reply_pairs(turns)
     pairs = dedupe_pairs(pairs)
-    pairs = apply_contact_minimum(pairs, min_contact_pairs=min_contact_pairs)
+    pairs = apply_contact_minimum(pairs, min_contact_pairs=config.min_contact_pairs)
     return pairs
 
 
@@ -506,34 +530,63 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convert Apple Messages chat.db into nanochat JSONL.")
     parser.add_argument("--db-path", required=True, help="Path to Apple Messages chat.db")
     parser.add_argument("--output-path", required=True, help="Path to write the nanochat JSONL file")
-    parser.add_argument("--min-contact-pairs", type=int, default=5, help="Minimum usable reply pairs required per contact")
-    parser.add_argument("--merge-gap-seconds", type=int, default=600, help="Merge same-speaker messages within this many seconds")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed used for deterministic chat limiting")
-    parser.add_argument("--limit-chats", type=int, default=None, help="Optional max number of 1:1 chats to process for debugging")
+    parser.add_argument(
+        "--min-contact-pairs",
+        type=int,
+        default=None,
+        help="Minimum usable reply pairs required per contact; overrides DEFAULT_CONFIG when passed",
+    )
+    parser.add_argument(
+        "--merge-gap-seconds",
+        type=int,
+        default=None,
+        help="Merge same-speaker messages within this many seconds; overrides DEFAULT_CONFIG when passed",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed used for deterministic chat limiting; overrides DEFAULT_CONFIG when passed",
+    )
+    parser.add_argument(
+        "--limit-chats",
+        type=int,
+        default=None,
+        help="Optional max number of 1:1 chats to process for debugging; overrides DEFAULT_CONFIG when passed",
+    )
     return parser.parse_args()
+
+
+def resolve_config(args: argparse.Namespace, default_config: ExtractionConfig = DEFAULT_CONFIG) -> ExtractionConfig:
+    return ExtractionConfig(
+        min_contact_pairs=(
+            default_config.min_contact_pairs if args.min_contact_pairs is None else args.min_contact_pairs
+        ),
+        merge_gap_seconds=(
+            default_config.merge_gap_seconds if args.merge_gap_seconds is None else args.merge_gap_seconds
+        ),
+        seed=default_config.seed if args.seed is None else args.seed,
+        limit_chats=default_config.limit_chats if args.limit_chats is None else args.limit_chats,
+        excluded_contact_labels=default_config.excluded_contact_labels,
+    )
 
 
 def main() -> int:
     args = parse_args()
     db_path = Path(args.db_path)
     output_path = Path(args.output_path)
+    config = resolve_config(args)
 
     if not db_path.exists():
         raise FileNotFoundError(f"chat.db not found: {db_path}")
-    if args.min_contact_pairs < 1:
+    if config.min_contact_pairs < 1:
         raise ValueError("--min-contact-pairs must be >= 1")
-    if args.merge_gap_seconds < 0:
+    if config.merge_gap_seconds < 0:
         raise ValueError("--merge-gap-seconds must be >= 0")
-    if args.limit_chats is not None and args.limit_chats < 1:
+    if config.limit_chats is not None and config.limit_chats < 1:
         raise ValueError("--limit-chats must be >= 1 when provided")
 
-    pairs = build_dataset(
-        db_path=db_path,
-        merge_gap_seconds=args.merge_gap_seconds,
-        min_contact_pairs=args.min_contact_pairs,
-        seed=args.seed,
-        limit_chats=args.limit_chats,
-    )
+    pairs = build_dataset(db_path=db_path, config=config)
     write_jsonl(pairs, output_path)
 
     print(f"Wrote {len(pairs)} reply pairs to {output_path}")

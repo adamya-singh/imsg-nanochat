@@ -7,8 +7,9 @@ This document stays high level and vision-oriented. Detailed step-by-step implem
 
 ## Progress So Far
 - Phase 1 is complete: this repo now acts as the wrapper workspace for planning, data prep, evaluation prompts, and the nested `nanochat/` codebase.
-- Phase 2 is partially complete: a working `chat.db` to nanochat JSONL converter exists at `training-data/scripts/build_nanochat_jsonl.py`, and it has focused tests.
+- Phase 2 is partially complete: a working `chat.db` to nanochat JSONL converter exists at `training-data/scripts/build_nanochat_jsonl.py`, it has focused tests, and it now supports configurable extraction defaults through `DEFAULT_CONFIG`.
 - The currently implemented data path is reply-only. It emits strict two-message nanochat samples with `[MODE: REPLY]` and `[CONTACT: ...]`.
+- Specific one-to-one chats can now be fully excluded by exact `contact_label` match through `excluded_contact_labels`.
 - Later phases remain pending in this wrapper repo: broader privacy/review workflows, richer dataset assembly, cloud training runs, checkpoint evaluation artifacts, and the future frontend.
 
 ## Key Changes
@@ -31,11 +32,12 @@ This document stays high level and vision-oriented. Detailed step-by-step implem
 - Set the first training scope to private, high-signal 1:1 conversations only:
   - merge nearby texts into turns
   - filter system/spam/OTP/automation noise
+  - allow explicit per-chat exclusion through editable extraction config
   - use minimal redaction at first and leave broader privacy scrubbing/manual review for a later dedicated pass
   - prevent single contacts or self-notes from dominating the dataset
 - Plan the workflow in phases rather than one monolithic build:
   - Phase 1: repo setup and data handling conventions. Status: complete.
-  - Phase 2: extraction and cleaning pipeline from `chat.db`. Status: partially complete through the reply-only converter.
+  - Phase 2: extraction and cleaning pipeline from `chat.db`. Status: partially complete through the reply-only converter, configurable extraction defaults, and explicit per-chat exclusion.
   - Phase 3: dataset assembly and balancing. Status: pending.
   - Phase 4: nanochat integration and cloud GPU training. Status: pending.
   - Phase 5: checkpoint evaluation and prompt/interface design. Status: pending.

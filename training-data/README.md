@@ -9,6 +9,8 @@ The emitted dataset uses strict two-message samples:
 - `user`: inbound contact turn prefixed with `[MODE: REPLY]` and `[CONTACT: ...]`
 - `assistant`: Adamya's direct reply turn
 
+This README is the source of truth for the currently implemented extraction interface and behavior in this wrapper repo.
+
 ## Intended Structure
 - `raw/`: copied exports such as `chat.db` or safe derived snapshots
 - `intermediate/`: parsed or cleaned outputs that are not final training data
@@ -17,6 +19,17 @@ The emitted dataset uses strict two-message samples:
 - `scripts/`: extraction and cleaning utilities
 
 ## `chat.db` Conversion
+Edit `DEFAULT_CONFIG` in `training-data/scripts/build_nanochat_jsonl.py` to set personal extraction defaults. This is the intended place to maintain your personal extraction settings in one block.
+
+Current configurable values include:
+- `min_contact_pairs`
+- `merge_gap_seconds`
+- `seed`
+- `limit_chats`
+- `excluded_contact_labels`
+
+`excluded_contact_labels` uses exact string matching against the same `contact_label` the script derives and emits in `[CONTACT: ...]`. This is intended for fully ignoring specific one-to-one chats.
+
 Use the v1 converter to build reply-only nanochat JSONL directly from Apple Messages:
 
 ```bash
@@ -30,6 +43,8 @@ Optional flags:
 - `--merge-gap-seconds 600`
 - `--seed 42`
 - `--limit-chats <int>`
+
+CLI flags override the values set in `DEFAULT_CONFIG` for that run. `excluded_contact_labels` remains controlled through the in-script config block.
 
 ## V1 Rules
 - Reads Apple Messages `chat.db` and only keeps one-to-one chats.
@@ -64,6 +79,8 @@ The current script and tests verify the following behavior:
 - Reactions, message effects, and media-only rows without ordinary text are excluded.
 - Identical final reply pairs are deduped.
 - Contacts below the configured minimum usable pair threshold are dropped.
+- Configured `excluded_contact_labels` fully remove matching one-to-one chats from extraction.
+- CLI values override `DEFAULT_CONFIG` values for that invocation.
 - The generated JSONL loads cleanly through nanochat's `CustomJSON` task format.
 
 ## Testing
@@ -78,3 +95,4 @@ python -m pytest training-data/tests/test_build_nanochat_jsonl.py -q
 - Broader privacy scrubbing and richer redaction passes are not yet automated here.
 - Dataset balancing beyond the current per-contact minimum threshold is still future work.
 - Direct wiring from `training-data/final/*.jsonl` into a local nanochat SFT workflow is not yet implemented in this wrapper project.
+- Checkpoint evaluation artifacts and the future frontend are still outside the implemented extraction pipeline.
