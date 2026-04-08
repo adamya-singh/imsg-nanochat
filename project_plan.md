@@ -5,6 +5,12 @@ Create a single repository that serves as the long-lived home for the project: p
 
 This document stays high level and vision-oriented. Detailed step-by-step implementation plans should be created later for each phase, especially data preparation, training, evaluation, and frontend work.
 
+## Progress So Far
+- Phase 1 is complete: this repo now acts as the wrapper workspace for planning, data prep, evaluation prompts, and the nested `nanochat/` codebase.
+- Phase 2 is partially complete: a working `chat.db` to nanochat JSONL converter exists at `training-data/scripts/build_nanochat_jsonl.py`, and it has focused tests.
+- The currently implemented data path is reply-only. It emits strict two-message nanochat samples with `[MODE: REPLY]` and `[CONTACT: ...]`.
+- Later phases remain pending in this wrapper repo: broader privacy/review workflows, richer dataset assembly, cloud training runs, checkpoint evaluation artifacts, and the future frontend.
+
 ## Key Changes
 - Establish this repo as the canonical project workspace with these top-level responsibilities:
   - `training-data/` for exported raw data, cleaned/intermediate datasets, redaction utilities, and final JSONL outputs
@@ -20,7 +26,7 @@ This document stays high level and vision-oriented. Detailed step-by-step implem
   - contact identity is encoded in message content rather than custom roles
 - Define the dataset contract early so all later plans align to it:
   - reply examples include `[MODE: REPLY]` and `[CONTACT: ...]`
-  - self-note examples include `[MODE: SELF_NOTE]`
+  - self-note examples include `[MODE: SELF_NOTE]` once that path is implemented
   - all training data is emitted as nanochat-style JSONL conversation samples
 - Set the first training scope to private, high-signal 1:1 conversations only:
   - merge nearby texts into turns
@@ -28,19 +34,19 @@ This document stays high level and vision-oriented. Detailed step-by-step implem
   - use minimal redaction at first and leave broader privacy scrubbing/manual review for a later dedicated pass
   - prevent single contacts or self-notes from dominating the dataset
 - Plan the workflow in phases rather than one monolithic build:
-  - Phase 1: repo setup and data handling conventions
-  - Phase 2: extraction and cleaning pipeline from `chat.db`
-  - Phase 3: dataset assembly and balancing
-  - Phase 4: nanochat integration and cloud GPU training
-  - Phase 5: checkpoint evaluation and prompt/interface design
-  - Phase 6: frontend integration later
+  - Phase 1: repo setup and data handling conventions. Status: complete.
+  - Phase 2: extraction and cleaning pipeline from `chat.db`. Status: partially complete through the reply-only converter.
+  - Phase 3: dataset assembly and balancing. Status: pending.
+  - Phase 4: nanochat integration and cloud GPU training. Status: pending.
+  - Phase 5: checkpoint evaluation and prompt/interface design. Status: pending.
+  - Phase 6: frontend integration later. Status: pending.
 
 ## Public Interfaces / Data Contracts
 - Primary training artifact: one or more JSONL files in nanochat-compatible conversation format
 - Input source: exported Apple Messages `chat.db`
 - Core sample shapes:
-  - reply sample: `user` content includes mode and contact header plus incoming text; `assistant` content is Adamya’s reply
-  - self-note sample: `user` content is a self-note instruction/header; `assistant` content is the private note text
+  - reply sample: `user` content includes mode and contact header plus incoming text; `assistant` content is Adamya’s reply. This shape is implemented today.
+  - self-note sample: `user` content is a self-note instruction/header; `assistant` content is the private note text. This remains planned.
 - Evaluation inputs should mirror the same mode-based prompting scheme so training and testing stay aligned
 
 ### Reply Sample

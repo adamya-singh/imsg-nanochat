@@ -6,6 +6,13 @@ The goal of this repository is to make the local setup ergonomic: collect Apple 
 
 This repository is the top-level project workspace. The `nanochat/` directory is tracked as a Git submodule so project-specific tooling can live here while model/runtime changes can be managed separately in the nanochat fork.
 
+## Current Status
+- The workspace structure is in place.
+- The Apple Messages to nanochat converter is implemented at `training-data/scripts/build_nanochat_jsonl.py`.
+- The converter is covered by focused tests in `training-data/tests/test_build_nanochat_jsonl.py`.
+- The wrapper project currently supports preparing reply-only nanochat JSONL from `chat.db`.
+- Downstream model training, evaluation artifacts, and the future frontend are still pending in this wrapper repo.
+
 ## Cloning
 Clone recursively so `nanochat/` is populated:
 
@@ -21,10 +28,10 @@ git submodule update --init --recursive
 
 ## Workflow
 1. Export or copy local message data into `training-data/raw/`.
-2. Run extraction and cleaning scripts from `training-data/scripts/`.
-3. Review intermediate outputs and privacy-sensitive samples.
-4. Export final nanochat-compatible JSONL files into `training-data/final/`.
-5. Move the prepared dataset and the `nanochat/` codebase to a GPU node for training.
+2. Run the implemented converter in `training-data/scripts/build_nanochat_jsonl.py` to produce reply-only nanochat JSONL from `chat.db`.
+3. Review outputs and privacy-sensitive samples. This is a manual workflow today, not a finished review toolchain.
+4. Export final nanochat-compatible JSONL files into `training-data/final/`. The directory exists, but no checked-in dataset artifact is included in this repo.
+5. Move the prepared dataset and the `nanochat/` codebase to a GPU node for training. This downstream training loop is still planned, not completed here.
 
 ## Current Layout
 - `project_plan.md`: high-level roadmap and project vision
