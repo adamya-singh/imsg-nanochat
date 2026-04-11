@@ -12,6 +12,26 @@ Canonical memory for important wrapper-repo tradeoffs, deferred choices, and rev
 
 ---
 
+## 2026-04-10: Keep reply-only behavior out of the v1 message text
+
+- Date: 2026-04-10
+- Decision: The wrapper repo's v1 extracted JSONL should not include `[MODE: REPLY]` in `user.content`. Reply-only behavior remains a property of the dataset, not an in-band text prefix.
+- Context: The initial extractor encoded reply mode directly in every training sample. With only one implemented data path, that prefix added schema noise without providing additional signal.
+- Why this choice won: The first dataset version should be as close as possible to raw conversational text while the project is still reply-only. This keeps the training artifact simpler and makes extraction defects easier to spot.
+- Cost / downside: If a later dataset version introduces `SELF_NOTE` or other modes, the project will need a fresh conditioning contract instead of reusing the old prefix scheme.
+- Revisit when: Revisit this only if the repo gains more than one training mode and needs explicit in-band conditioning again.
+- Related files or artifacts: `training-data/scripts/build_nanochat_jsonl.py`, `training-data/README.md`, `project_plan.md`
+
+## 2026-04-10: Keep contact identity out of the v1 training contract
+
+- Date: 2026-04-10
+- Decision: The wrapper repo's v1 extracted JSONL should remain contact-agnostic. Contact identity is used only inside the extractor for one-to-one chat selection, `excluded_contact_labels`, and minimum-history filtering, and is not emitted into training samples.
+- Context: The earlier sample contract included contact headers in the training text. That added setup burden because contact labels would need cleanup or name resolution before the first usable dataset version.
+- Why this choice won: The first project version should optimize for getting a clean reply-only dataset with minimal manual metadata work. Local exclusions still cover the immediate privacy and curation need without making contact identity part of the training schema.
+- Cost / downside: The v1 training artifact cannot directly support contact-conditioned prompting or contact-specific evaluation prompts.
+- Revisit when: Revisit this only if a later dataset version intentionally introduces contact-conditioned behavior and there is a clear plan for stable contact naming or aliasing.
+- Related files or artifacts: `training-data/scripts/build_nanochat_jsonl.py`, `training-data/README.md`, `project_plan.md`
+
 ## 2026-04-08: Prefer precision over recall for `attributedBody` extraction
 
 - Date: 2026-04-08

@@ -74,6 +74,7 @@ def create_fixture_db(db_path: Path) -> None:
             (5, "+15550000005", None),
             (6, "+15550000006", None),
             (7, "+15550000007", None),
+            (8, "+15550000008", None),
         ]
         conn.executemany("INSERT INTO handle(ROWID, id, uncanonicalized_id) VALUES (?, ?, ?)", handles)
 
@@ -85,6 +86,7 @@ def create_fixture_db(db_path: Path) -> None:
             (5, "+15550000005"),
             (6, "+15550000006"),
             (7, "+15550000007"),
+            (8, "+15550000008"),
         ]
         conn.executemany("INSERT INTO chat(ROWID, chat_identifier) VALUES (?, ?)", chats)
 
@@ -97,6 +99,7 @@ def create_fixture_db(db_path: Path) -> None:
             (5, 5),
             (6, 6),
             (7, 7),
+            (8, 8),
         ]
         conn.executemany("INSERT INTO chat_handle_join(chat_id, handle_id) VALUES (?, ?)", chat_handles)
 
@@ -141,7 +144,14 @@ def create_fixture_db(db_path: Path) -> None:
             (700, "same prompt", None, 100, 0, 7, None, 0, 0, None, None),
             (701, "same reply", None, 110, 1, None, None, 0, 0, None, None),
             (702, "same prompt", None, 200, 0, 7, None, 0, 0, None, None),
-            (703, "same reply", None, 210, 1, None, None, 0, 0, None, None)
+            (703, "same reply", None, 210, 1, None, None, 0, 0, None, None),
+            # chat 8: contaminated pairs should be dropped entirely
+            (800, "$38056097-E199-431B-83A0-9897ADD97DB2", None, 100, 0, 8, None, 0, 0, None, None),
+            (801, "artifact reply should drop", None, 110, 1, None, None, 0, 0, None, None),
+            (802, "normal prompt", None, 200, 0, 8, None, 0, 0, None, None),
+            (803, "%&'(Z$classnameX$classesWNSValue", None, 210, 1, None, None, 0, 0, None, None),
+            (804, "$%&,-.39=>DLPQRSVYZ^dhijklrvwxyU$null\nre free on those days", None, 300, 0, 8, None, 0, 0, None, None),
+            (805, "normal reply should also drop", None, 310, 1, None, None, 0, 0, None, None),
         ]
         conn.executemany(
             """
@@ -169,6 +179,8 @@ def create_fixture_db(db_path: Path) -> None:
             chat_message_rows.append((6, message_id))
         for message_id in range(700, 704):
             chat_message_rows.append((7, message_id))
+        for message_id in range(800, 806):
+            chat_message_rows.append((8, message_id))
         conn.executemany(
             "INSERT INTO chat_message_join(chat_id, message_id) VALUES (?, ?)",
             chat_message_rows,
@@ -229,6 +241,50 @@ def test_recover_attributed_text_rejects_low_confidence_noise_blob() -> None:
     assert recovered == ""
 
 
+def test_recover_attributed_text_rejects_xnsobject_duration_noise() -> None:
+    blob = b"(*XNSObject]due yesterday\\DateDuration"
+    recovered = build_nanochat_jsonl.recover_attributed_text(blob)
+    assert recovered == ""
+
+
+def test_recover_attributed_text_rejects_archive_object_tokens() -> None:
+    blob = b"X$versionY$archiverT$topX$objects"
+    recovered = build_nanochat_jsonl.recover_attributed_text(blob)
+    assert recovered == ""
+
+
+def test_recover_attributed_text_rejects_uuid_object_blob() -> None:
+    blob = b"38056097-E199-431B-83A0-9897ADD97DB2"
+    recovered = build_nanochat_jsonl.recover_attributed_text(blob)
+    assert recovered == ""
+
+
+def test_recover_attributed_text_rejects_structured_canvas_dump() -> None:
+    blob = (
+        b"(He/Him) (https://rutgers.instructure.com/groups/424464/users/533285)\n"
+        b"WILMER JOYA\n"
+        b"(https://rutgers.instructure.com/groups/424464/users/465802)\n"
+        b"AIDAN SHUMAKER"
+    )
+    recovered = build_nanochat_jsonl.recover_attributed_text(blob)
+    assert recovered == ""
+
+
+def test_structured_metadata_rejects_dollar_null_symbol_blob() -> None:
+    candidate = "$%&,-.39=>DLPQRSVYZ^dhijklrvwxyU$null\nre free on those days"
+    assert build_nanochat_jsonl.looks_like_structured_metadata(candidate) is True
+
+
+def test_structured_metadata_rejects_punctuated_uuid_blob() -> None:
+    candidate = "$38056097-E199-431B-83A0-9897ADD97DB2"
+    assert build_nanochat_jsonl.looks_like_structured_metadata(candidate) is True
+
+
+def test_structured_metadata_rejects_nsvalue_archive_tokens() -> None:
+    candidate = "%&'(Z$classnameX$classesWNSValue\nConrad and i goin"
+    assert build_nanochat_jsonl.looks_like_structured_metadata(candidate) is True
+
+
 def test_build_dataset_filters_and_formats(tmp_path: Path) -> None:
     db_path = tmp_path / "chat.db"
     create_fixture_db(db_path)
@@ -242,7 +298,8 @@ def test_build_dataset_filters_and_formats(tmp_path: Path) -> None:
     assert all(len(pair) == 2 for pair in pairs)
     assert all(pair[0]["role"] == "user" for pair in pairs)
     assert all(pair[1]["role"] == "assistant" for pair in pairs)
-    assert all(pair[0]["content"].startswith("[MODE: REPLY]\n[CONTACT: +15550000001]\n") for pair in pairs)
+    assert all(not pair[0]["content"].startswith("[MODE: REPLY]") for pair in pairs)
+    assert all("[CONTACT:" not in pair[0]["content"] for pair in pairs)
 
     merged_prompt = next(pair[0]["content"] for pair in pairs if "need anything" in pair[0]["content"])
     assert merged_prompt.endswith("need anything\nfrom the store")
@@ -251,13 +308,37 @@ def test_build_dataset_filters_and_formats(tmp_path: Path) -> None:
     assert attributed_prompt.endswith("dont forget lunch")
 
     rendered = "\n".join(json.dumps(pair) for pair in pairs)
-    assert "+15550000002" not in rendered
+    assert "[MODE: REPLY]" not in rendered
+    assert "[CONTACT:" not in rendered
     assert "verification code" not in rendered.lower()
     assert "same prompt" not in rendered
     assert "streamtyped" not in rendered
     assert "NSAttributedString" not in rendered
     assert "__kIMMessagePartAttributeName" not in rendered
     assert "bplist00" not in rendered
+    assert "$null" not in rendered
+    assert "$classname" not in rendered
+    assert "$classes" not in rendered
+    assert "NSValue" not in rendered
+    assert "38056097-E199-431B-83A0-9897ADD97DB2" not in rendered
+
+
+def test_build_dataset_drops_pairs_with_artifact_text_on_either_side(tmp_path: Path) -> None:
+    db_path = tmp_path / "chat.db"
+    create_fixture_db(db_path)
+
+    config = build_nanochat_jsonl.ExtractionConfig(min_contact_pairs=1)
+    pairs = build_nanochat_jsonl.build_dataset(db_path=db_path, config=config)
+    rendered = "\n".join(json.dumps(pair) for pair in pairs)
+
+    assert "artifact reply should drop" not in rendered
+    assert "normal prompt" not in rendered
+    assert "normal reply should also drop" not in rendered
+    assert "38056097-E199-431B-83A0-9897ADD97DB2" not in rendered
+    assert "$classname" not in rendered
+    assert "$classes" not in rendered
+    assert "NSValue" not in rendered
+    assert "$null" not in rendered
 
 
 def test_turn_building_respects_merge_gap(tmp_path: Path) -> None:
@@ -367,8 +448,7 @@ def test_excluded_contact_does_not_appear_in_results(tmp_path: Path) -> None:
     rendered = "\n".join(json.dumps(pair) for pair in pairs)
 
     assert len(pairs) == 6
-    assert "+15550000001" in rendered
-    assert "+15550000002" not in rendered
+    assert "[CONTACT:" not in rendered
 
 
 def test_example_json_config_matches_expected_defaults(tmp_path: Path) -> None:

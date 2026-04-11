@@ -3,7 +3,7 @@
 Convert Apple Messages chat.db into nanochat-compatible JSONL.
 
 The emitted dataset is reply-only and uses strict two-message samples:
-1) user: inbound contact turn with mode/contact headers
+1) user: inbound contact turn
 2) assistant: Adamya's direct reply turn
 """
 
@@ -42,6 +42,20 @@ ARCHIVE_MARKERS = (
     "ns.objects",
     "nskeyedarchiver",
 )
+UUID_RE = re.compile(
+    r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
+)
+URL_RE = re.compile(r"https?://\S+")
+SUSPICIOUS_TEXT_PATTERNS = [
+    re.compile(r"(?i)x?nsobject"),
+    re.compile(r"(?i)(?:time|date)duration"),
+    re.compile(r"(?i)\$objects|\$archiver|\$version|\$top"),
+    re.compile(r"(?i)fulladdress"),
+    re.compile(r"(?i)rutgers\.instructure\.com"),
+    re.compile(r"(?i)https?://\S+/users/\d+"),
+    re.compile(r"(?i)https?://\S+/groups/\d+"),
+    re.compile(r"\\(?:TimeDuration|DateDuration)\b"),
+]
 
 JUNK_PATTERNS = [
     re.compile(r"(?i)\b(?:verification|security|pass|login|otp)\s*code\b"),
@@ -92,6 +106,12 @@ class Turn:
     end_timestamp: float
     message_ids: tuple[int, ...]
     text: str
+
+
+@dataclass(frozen=True)
+class ReplyPair:
+    contact_label: str
+    messages: list[dict[str, str]]
 
 
 @dataclass
@@ -171,6 +191,8 @@ def is_human_text_candidate(candidate: str) -> bool:
     lower = normalized.lower()
     if archive_marker_hits(normalized) > 0:
         return False
+    if looks_like_structured_metadata(normalized):
+        return False
     if control_character_ratio(normalized) > 0:
         return False
     if len(normalized) < 2:
@@ -192,6 +214,39 @@ def is_human_text_candidate(candidate: str) -> bool:
         return False
 
     return True
+
+
+def looks_like_structured_metadata(candidate: str) -> bool:
+    normalized = normalize_text(candidate)
+    if not normalized:
+        return False
+
+    if any(pattern.search(normalized) for pattern in SUSPICIOUS_TEXT_PATTERNS):
+        return True
+
+    if "$null" in normalized.lower():
+        return True
+
+    urls = URL_RE.findall(normalized)
+    if len(urls) >= 2:
+        return True
+
+    uuid_hits = UUID_RE.findall(normalized)
+    if uuid_hits:
+        normalized_stripped = normalized.lstrip("$#%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+        if normalized_stripped == uuid_hits[0]:
+            return True
+        if len(uuid_hits) > 1:
+            return True
+        visible_chars = [ch for ch in normalized if ch.isprintable() and not ch.isspace()]
+        uuid_chars = len(uuid_hits[0])
+        if visible_chars and uuid_chars / len(visible_chars) >= 0.6:
+            return True
+
+    if "$classname" in normalized or "$classes" in normalized or "NSValue" in normalized:
+        return True
+
+    return False
 
 
 def candidate_score(candidate: str) -> tuple[int, int, int]:
@@ -579,11 +634,11 @@ def build_turns(rows: Sequence[MessageRow], merge_gap_seconds: int) -> list[Turn
     return turns
 
 
-def render_pair(contact_label: str, inbound_text: str, reply_text: str) -> list[dict[str, str]]:
+def render_pair(inbound_text: str, reply_text: str) -> list[dict[str, str]]:
     return [
         {
             "role": "user",
-            "content": f"[MODE: REPLY]\n[CONTACT: {contact_label}]\n{inbound_text}",
+            "content": inbound_text,
         },
         {
             "role": "assistant",
@@ -592,8 +647,8 @@ def render_pair(contact_label: str, inbound_text: str, reply_text: str) -> list[
     ]
 
 
-def build_reply_pairs(turns: Sequence[Turn], stats: ExtractionStats | None = None) -> list[list[dict[str, str]]]:
-    pairs: list[list[dict[str, str]]] = []
+def build_reply_pairs(turns: Sequence[Turn], stats: ExtractionStats | None = None) -> list[ReplyPair]:
+    pairs: list[ReplyPair] = []
     i = 0
     while i < len(turns) - 1:
         current = turns[i]
@@ -607,34 +662,47 @@ def build_reply_pairs(turns: Sequence[Turn], stats: ExtractionStats | None = Non
 
         inbound_text = normalize_text(current.text)
         reply_text = normalize_text(nxt.text)
+        next_same_chat = i + 2 < len(turns) and turns[i + 2].chat_id == current.chat_id
         if inbound_text and reply_text:
-            if not looks_like_junk_text(inbound_text) and not looks_like_junk_text(reply_text):
-                pairs.append(render_pair(current.contact_label, inbound_text, reply_text))
-            elif stats is not None:
-                stats.pairs_dropped_junk += 1
-        i += 1
+            if looks_like_structured_metadata(inbound_text) or looks_like_structured_metadata(reply_text):
+                if stats is not None:
+                    stats.pairs_dropped_junk += 1
+                i += 2 if next_same_chat else 1
+            elif not looks_like_junk_text(inbound_text) and not looks_like_junk_text(reply_text):
+                pairs.append(
+                    ReplyPair(
+                        contact_label=current.contact_label,
+                        messages=render_pair(inbound_text, reply_text),
+                    )
+                )
+                i += 1
+            else:
+                if stats is not None:
+                    stats.pairs_dropped_junk += 1
+                i += 1
+        else:
+            i += 1
 
     return pairs
 
 
-def dedupe_pairs(pairs: Iterable[list[dict[str, str]]]) -> list[list[dict[str, str]]]:
-    unique: dict[str, list[dict[str, str]]] = {}
+def dedupe_pairs(pairs: Iterable[ReplyPair]) -> list[ReplyPair]:
+    unique: dict[str, ReplyPair] = {}
     for pair in pairs:
-        line = json.dumps(pair, ensure_ascii=False, separators=(",", ":"))
+        line = json.dumps(pair.messages, ensure_ascii=False, separators=(",", ":"))
         unique.setdefault(line, pair)
     return [unique[key] for key in sorted(unique)]
 
 
 def apply_contact_minimum(
-    pairs: Sequence[list[dict[str, str]]],
+    pairs: Sequence[ReplyPair],
     min_contact_pairs: int,
-) -> list[list[dict[str, str]]]:
+) -> list[ReplyPair]:
     counts: dict[str, int] = {}
     for pair in pairs:
-        header = pair[0]["content"].splitlines()[1]
-        counts[header] = counts.get(header, 0) + 1
+        counts[pair.contact_label] = counts.get(pair.contact_label, 0) + 1
 
-    filtered = [pair for pair in pairs if counts[pair[0]["content"].splitlines()[1]] >= min_contact_pairs]
+    filtered = [pair for pair in pairs if counts[pair.contact_label] >= min_contact_pairs]
     return filtered
 
 
@@ -657,7 +725,7 @@ def build_dataset(
     pairs = build_reply_pairs(turns, stats=stats)
     pairs = dedupe_pairs(pairs)
     pairs = apply_contact_minimum(pairs, min_contact_pairs=config.min_contact_pairs)
-    return pairs
+    return [pair.messages for pair in pairs]
 
 
 def write_jsonl(pairs: Sequence[list[dict[str, str]]], output_path: Path) -> None:

@@ -3,13 +3,13 @@
 Workspace for data extraction, cleaning, review, and final training artifacts.
 
 ## Current Progress
-The wrapper repo currently has one implemented data-preparation path: `training-data/scripts/build_nanochat_jsonl.py` converts Apple Messages `chat.db` into reply-only nanochat JSONL. The extractor is driven by a local JSON config file, seeded from a checked-in example config, supports explicit per-chat exclusion through `excluded_contact_labels`, and now uses a precision-first `attributedBody` fallback.
+The wrapper repo currently has one implemented data-preparation path: `training-data/scripts/build_nanochat_jsonl.py` converts Apple Messages `chat.db` into reply-only, contact-agnostic nanochat JSONL. The extractor is driven by a local JSON config file, seeded from a checked-in example config, supports explicit per-chat exclusion through `excluded_contact_labels`, and now uses a precision-first `attributedBody` fallback.
 
 ## Implemented Today
-The current implemented pipeline is `training-data/scripts/build_nanochat_jsonl.py`, which converts Apple Messages `chat.db` into reply-only nanochat JSONL.
+The current implemented pipeline is `training-data/scripts/build_nanochat_jsonl.py`, which converts Apple Messages `chat.db` into reply-only, contact-agnostic nanochat JSONL.
 
 The emitted dataset uses strict two-message samples:
-- `user`: inbound contact turn prefixed with `[MODE: REPLY]` and `[CONTACT: ...]`
+- `user`: raw inbound message turn
 - `assistant`: Adamya's direct reply turn
 
 This README is the source of truth for the currently implemented extraction interface and behavior in this wrapper repo.
@@ -32,7 +32,7 @@ Current configurable values include:
 - `limit_chats`
 - `excluded_contact_labels`
 
-`excluded_contact_labels` uses exact string matching against the same `contact_label` the script derives and emits in `[CONTACT: ...]`. This is intended for fully ignoring specific one-to-one chats.
+`excluded_contact_labels` uses exact string matching against the same internal `contact_label` the script derives while scanning one-to-one chats. This is intended for fully ignoring specific one-to-one chats during extraction, even though contact identity is not emitted into the final training samples.
 
 Use the v1 converter to build reply-only nanochat JSONL directly from Apple Messages:
 
@@ -58,14 +58,14 @@ CLI flags override the values set in the loaded config file for that run. `exclu
 
 ## V1 Rules
 - Reads Apple Messages `chat.db` and only keeps one-to-one chats.
-- Emits strict 2-message nanochat samples: inbound contact turn as `user`, Adamya reply as `assistant`.
+- Emits strict 2-message nanochat samples: inbound message turn as `user`, Adamya reply as `assistant`.
 - Formats prompts as:
 
 ```json
 [
   {
     "role": "user",
-    "content": "[MODE: REPLY]\n[CONTACT: <chat_db_handle>]\n<incoming_text>"
+    "content": "<incoming_text>"
   },
   {
     "role": "assistant",
@@ -99,6 +99,7 @@ The current script and tests verify the following behavior:
 - CLI values override loaded config values for that invocation.
 - The converter prints extraction stats after each run, including rows using `message.text`, rows using clean `attributedBody`, low-confidence `attributedBody` drops, reaction/effect drops, media-only drops, empty-text drops, and junk-pair drops.
 - The generated JSONL loads cleanly through nanochat's `CustomJSON` task format.
+- Contact identity is kept internal to extraction for exclusion and minimum-history filtering, but is not present in emitted JSONL.
 
 ## Notes On Output Size
 Row counts may decrease after extractor cleanup. This is expected when the script prefers clean training text over maximum recovery from noisy `attributedBody` blobs. If the dataset becomes materially smaller after a cleanup change, check `decision_log.md` and the printed extraction stats before assuming the run regressed.
@@ -114,5 +115,6 @@ python -m pytest training-data/tests/test_build_nanochat_jsonl.py -q
 - `SELF_NOTE` dataset generation is still planned and is not part of this converter.
 - Broader privacy scrubbing and richer redaction passes are not yet automated here.
 - Dataset balancing beyond the current per-contact minimum threshold is still future work.
+- Contact-specific conditioning is not part of the current v1 training artifact; any return of contact identity is future work.
 - Direct wiring from `training-data/final/*.jsonl` into a local nanochat SFT workflow is not yet implemented in this wrapper project.
 - Checkpoint evaluation artifacts and the future frontend are still outside the implemented extraction pipeline.
