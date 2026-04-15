@@ -26,3 +26,7 @@ training-data/review/**
 nanochat/.pytest_cache/
 nanochat/.venv/
 nanochat/__pycache__/
+
+# Qwen fine-tune generated outputs
+qwen-3-0.6b-sft/output*/
+qwen-3-0.6b-sft/**/checkpoint-*/
