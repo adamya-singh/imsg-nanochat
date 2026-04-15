@@ -50,3 +50,29 @@ Defaults:
 - generates a minimal `README.md` model card unless `--no-model-card` is passed
 
 Use `--readme-path path/to/README.md` to upload a custom model card instead of the generated one.
+
+## Pull And Run
+
+The local run helper will reuse a saved model directory if it already exists, or pull the model from Hugging Face into the same output folder before running.
+
+Default behavior pulls into `qwen-3-0.6b-sft/output` and runs an interactive chat loop:
+
+```bash
+python qwen-3-0.6b-sft/run_model.py
+```
+
+Override the local folder if you already have a specific trained directory such as `output-pilot`:
+
+```bash
+python qwen-3-0.6b-sft/run_model.py \
+  --model-dir qwen-3-0.6b-sft/output-pilot
+```
+
+Use one-shot prompt mode instead of interactive chat:
+
+```bash
+python qwen-3-0.6b-sft/run_model.py \
+  --prompt "you free later?"
+```
+
+For the private uploaded repo, authenticate first with either `HF_TOKEN` or `hf auth login`.
