@@ -30,3 +30,7 @@ nanochat/__pycache__/
 # Qwen fine-tune generated outputs
 qwen-3-0.6b-sft/output*/
 qwen-3-0.6b-sft/**/checkpoint-*/
+qwen-3-14b-qlora-sft/.cache/
+qwen-3-14b-qlora-sft/output*/
+qwen-3-14b-qlora-sft/*adapter*/
+qwen-3-14b-qlora-sft/**/checkpoint-*/

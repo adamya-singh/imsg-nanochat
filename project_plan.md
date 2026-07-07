@@ -13,7 +13,9 @@ This document stays high level and vision-oriented. Detailed step-by-step implem
 - Specific one-to-one chats can now be fully excluded by exact `contact_label` match through `excluded_contact_labels`.
 - `attributedBody` handling is now precision-first: clean text is kept, but noisy Apple archive payloads are dropped instead of guessed.
 - Wrapper-repo tradeoffs are now tracked separately in `decision_log.md` so roadmap docs stay high level.
-- Later phases remain pending in this wrapper repo: broader privacy/review workflows, richer dataset assembly, cloud training runs, checkpoint evaluation artifacts, and the future frontend.
+- A historical Qwen3-0.6B full fine-tune path exists for the earlier 16 GB M1 workflow.
+- A new Qwen3-14B QLoRA adapter path exists for the RTX 3090 cluster workflow.
+- Later phases remain pending in this wrapper repo: broader privacy/review workflows, richer dataset assembly, checkpoint evaluation artifacts, and the future frontend.
 
 ## Key Changes
 - Establish this repo as the canonical project workspace with these top-level responsibilities:
@@ -43,7 +45,7 @@ This document stays high level and vision-oriented. Detailed step-by-step implem
   - Phase 1: repo setup and data handling conventions. Status: complete.
   - Phase 2: extraction and cleaning pipeline from `chat.db`. Status: partially complete through the reply-only converter, external JSON config, example/local config split, explicit per-chat exclusion, and precision-first `attributedBody` cleanup.
   - Phase 3: dataset assembly and balancing. Status: pending.
-  - Phase 4: nanochat integration and cloud GPU training. Status: pending.
+  - Phase 4: model training experiments. Status: partially complete through a Qwen3-0.6B pilot path and a Qwen3-14B QLoRA cluster path.
   - Phase 5: checkpoint evaluation and prompt/interface design. Status: pending.
   - Phase 6: frontend integration later. Status: pending.
 

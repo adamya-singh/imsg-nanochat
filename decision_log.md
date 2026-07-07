@@ -12,6 +12,16 @@ Canonical memory for important wrapper-repo tradeoffs, deferred choices, and rev
 
 ---
 
+## 2026-07-07: Add Qwen3-14B QLoRA as the cluster path
+
+- Date: 2026-07-07
+- Decision: Keep the Qwen3-0.6B experiment intact and add `qwen-3-14b-qlora-sft/` as a parallel adapter-only QLoRA path for the RTX 3090 cluster.
+- Context: The original 0.6B model was chosen for a 16 GB M1 MacBook Pro. The cluster exposes a 24 GB RTX 3090, making a 14B model practical with 4-bit QLoRA but not a full fine-tune.
+- Why this choice won: A parallel directory preserves the old pilot while making the new hardware path explicit. Adapter-only output keeps disk and VRAM requirements reasonable.
+- Cost / downside: The repo now has two Qwen experiment paths that may duplicate helper code.
+- Revisit when: Revisit if the project standardizes on a shared experiment framework, moves to multi-GPU training, or needs merged full-weight deployment artifacts.
+- Related files or artifacts: `qwen-3-0.6b-sft/`, `qwen-3-14b-qlora-sft/`, `training-data/final/messages_reply_pairs.jsonl`
+
 ## 2026-04-10: Keep reply-only behavior out of the v1 message text
 
 - Date: 2026-04-10
