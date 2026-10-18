@@ -111,6 +111,12 @@ Run the focused converter tests from the repo root:
 python -m pytest training-data/tests/test_build_nanochat_jsonl.py -q
 ```
 
+## Dataset Studio
+
+The local app in `nextjs-frontend/` imports the generated JSONL into an ignored SQLite curation workspace. It can also run this extractor with private provenance and machine-readable stats enabled, creating immutable versioned runs without changing `chat.db` or the original JSONL.
+
+Curated train, validation, and test exports are written under `training-data/final/runs/`. Provenance, review states, tags, notes, and operation history are never included in those training files.
+
 ## Not Implemented Yet
 - `SELF_NOTE` dataset generation is still planned and is not part of this converter.
 - Broader privacy scrubbing and richer redaction passes are not yet automated here.

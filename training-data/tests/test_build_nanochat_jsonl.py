@@ -203,6 +203,59 @@ def load_pairs(path: Path) -> list[list[dict[str, str]]]:
     ]
 
 
+def test_provenance_sidecar_aligns_without_contact_labels(tmp_path: Path) -> None:
+    db_path = tmp_path / "chat.db"
+    create_fixture_db(db_path)
+    stats = build_nanochat_jsonl.ExtractionStats()
+    records = build_nanochat_jsonl.build_dataset_records(
+        db_path=db_path,
+        config=build_nanochat_jsonl.load_config(EXAMPLE_CONFIG_PATH),
+        stats=stats,
+    )
+    dataset_path = tmp_path / "dataset.jsonl"
+    provenance_path = tmp_path / "provenance.jsonl"
+
+    build_nanochat_jsonl.write_jsonl([record.messages for record in records], dataset_path)
+    build_nanochat_jsonl.write_provenance_jsonl(records, provenance_path)
+
+    dataset_lines = dataset_path.read_text(encoding="utf-8").splitlines()
+    provenance_lines = provenance_path.read_text(encoding="utf-8").splitlines()
+    assert len(dataset_lines) == len(provenance_lines) == 6
+    for line in provenance_lines:
+        provenance = json.loads(line)
+        assert set(provenance) == {
+            "source_key",
+            "chat_id",
+            "inbound_message_ids",
+            "reply_message_ids",
+            "start_timestamp",
+            "end_timestamp",
+        }
+        assert "contact_label" not in provenance
+
+    payload = build_nanochat_jsonl.stats_payload(stats, len(records))
+    assert payload["pair_count"] == 6
+
+
+def test_atomic_jsonl_write_does_not_replace_destination_on_failure(tmp_path: Path) -> None:
+    output_path = tmp_path / "dataset.jsonl"
+    output_path.write_text("original\n", encoding="utf-8")
+
+    def failing_lines():
+        yield "partial"
+        raise RuntimeError("simulated interruption")
+
+    try:
+        build_nanochat_jsonl._atomic_write_lines(failing_lines(), output_path)
+    except RuntimeError as exc:
+        assert str(exc) == "simulated interruption"
+    else:
+        raise AssertionError("expected the interrupted write to fail")
+
+    assert output_path.read_text(encoding="utf-8") == "original\n"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_recover_attributed_text_keeps_clean_plain_text() -> None:
     recovered = build_nanochat_jsonl.recover_attributed_text(b"meta\x00dont forget lunch")
     assert recovered == "dont forget lunch"

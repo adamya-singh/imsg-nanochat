@@ -1,0 +1,7 @@
+.example-card:focus-visible {
+  border-color: #86a291;
+  box-shadow:
+    0 0 0 3px rgba(24, 77, 59, 0.16),
+    0 12px 26px rgba(29, 51, 39, 0.07);
+  outline: none;
+}

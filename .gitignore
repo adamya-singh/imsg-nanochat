@@ -1,4 +1,6 @@
 .DS_Store
+node_modules/
+.next/
 .pytest_cache/
 .venv/
 venv/

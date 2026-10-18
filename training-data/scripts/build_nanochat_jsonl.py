@@ -10,11 +10,14 @@ The emitted dataset is reply-only and uses strict two-message samples:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import plistlib
 import random
 import re
 import sqlite3
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -112,6 +115,32 @@ class Turn:
 class ReplyPair:
     contact_label: str
     messages: list[dict[str, str]]
+    chat_id: int
+    inbound_message_ids: tuple[int, ...]
+    reply_message_ids: tuple[int, ...]
+    start_timestamp: float
+    end_timestamp: float
+
+    @property
+    def source_key(self) -> str:
+        raw = ":".join(
+            [
+                str(self.chat_id),
+                ",".join(map(str, self.inbound_message_ids)),
+                ",".join(map(str, self.reply_message_ids)),
+            ]
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def provenance(self) -> dict[str, object]:
+        return {
+            "source_key": self.source_key,
+            "chat_id": self.chat_id,
+            "inbound_message_ids": list(self.inbound_message_ids),
+            "reply_message_ids": list(self.reply_message_ids),
+            "start_timestamp": self.start_timestamp,
+            "end_timestamp": self.end_timestamp,
+        }
 
 
 @dataclass
@@ -673,6 +702,11 @@ def build_reply_pairs(turns: Sequence[Turn], stats: ExtractionStats | None = Non
                     ReplyPair(
                         contact_label=current.contact_label,
                         messages=render_pair(inbound_text, reply_text),
+                        chat_id=current.chat_id,
+                        inbound_message_ids=current.message_ids,
+                        reply_message_ids=nxt.message_ids,
+                        start_timestamp=current.start_timestamp,
+                        end_timestamp=nxt.end_timestamp,
                     )
                 )
                 i += 1
@@ -706,11 +740,11 @@ def apply_contact_minimum(
     return filtered
 
 
-def build_dataset(
+def build_dataset_records(
     db_path: Path,
     config: ExtractionConfig,
     stats: ExtractionStats | None = None,
-) -> list[list[dict[str, str]]]:
+) -> list[ReplyPair]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -725,21 +759,66 @@ def build_dataset(
     pairs = build_reply_pairs(turns, stats=stats)
     pairs = dedupe_pairs(pairs)
     pairs = apply_contact_minimum(pairs, min_contact_pairs=config.min_contact_pairs)
-    return [pair.messages for pair in pairs]
+    return pairs
+
+
+def build_dataset(
+    db_path: Path,
+    config: ExtractionConfig,
+    stats: ExtractionStats | None = None,
+) -> list[list[dict[str, str]]]:
+    return [pair.messages for pair in build_dataset_records(db_path, config, stats)]
+
+
+def _atomic_write_lines(lines: Iterable[str], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            for line in lines:
+                handle.write(line)
+                handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, output_path)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def write_jsonl(pairs: Sequence[list[dict[str, str]]], output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as handle:
-        for pair in pairs:
-            handle.write(json.dumps(pair, ensure_ascii=False, separators=(",", ":")))
-            handle.write("\n")
+    _atomic_write_lines(
+        (json.dumps(pair, ensure_ascii=False, separators=(",", ":")) for pair in pairs),
+        output_path,
+    )
+
+
+def write_provenance_jsonl(pairs: Sequence[ReplyPair], output_path: Path) -> None:
+    _atomic_write_lines(
+        (json.dumps(pair.provenance(), separators=(",", ":")) for pair in pairs),
+        output_path,
+    )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convert Apple Messages chat.db into nanochat JSONL.")
     parser.add_argument("--db-path", required=True, help="Path to Apple Messages chat.db")
     parser.add_argument("--output-path", required=True, help="Path to write the nanochat JSONL file")
+    parser.add_argument(
+        "--provenance-output-path",
+        default=None,
+        help="Optional path for a private JSONL sidecar with source IDs and timestamps",
+    )
+    parser.add_argument(
+        "--stats-output-path",
+        default=None,
+        help="Optional path for machine-readable extraction statistics",
+    )
     parser.add_argument(
         "--config-path",
         default=None,
@@ -799,6 +878,19 @@ def format_stats(stats: ExtractionStats) -> str:
     )
 
 
+def stats_payload(stats: ExtractionStats, pair_count: int) -> dict[str, int]:
+    return {
+        "pair_count": pair_count,
+        "rows_using_message_text": stats.rows_using_message_text,
+        "rows_using_attributed_body": stats.rows_using_attributed_body,
+        "rows_dropped_low_confidence_attributed": stats.rows_dropped_low_confidence_attributed,
+        "rows_dropped_reaction_or_effect": stats.rows_dropped_reaction_or_effect,
+        "rows_dropped_media_only": stats.rows_dropped_media_only,
+        "rows_dropped_empty_text": stats.rows_dropped_empty_text,
+        "pairs_dropped_junk": stats.pairs_dropped_junk,
+    }
+
+
 def main() -> int:
     args = parse_args()
     db_path = Path(args.db_path)
@@ -816,8 +908,17 @@ def main() -> int:
         raise ValueError("--limit-chats must be >= 1 when provided")
 
     stats = ExtractionStats()
-    pairs = build_dataset(db_path=db_path, config=config, stats=stats)
+    records = build_dataset_records(db_path=db_path, config=config, stats=stats)
+    pairs = [record.messages for record in records]
     write_jsonl(pairs, output_path)
+    if args.provenance_output_path is not None:
+        write_provenance_jsonl(records, Path(args.provenance_output_path))
+    if args.stats_output_path is not None:
+        stats_path = Path(args.stats_output_path)
+        _atomic_write_lines(
+            [json.dumps(stats_payload(stats, len(pairs)), separators=(",", ":"))],
+            stats_path,
+        )
 
     print(f"Wrote {len(pairs)} reply pairs to {output_path}")
     print(format_stats(stats))

@@ -17,7 +17,7 @@ This repository is the top-level project workspace. The `nanochat/` directory is
 - A historical M1-friendly Qwen3-0.6B full fine-tune path lives in `qwen-3-0.6b-sft/`, including local run/upload helpers and notes for the private pilot upload.
 - A new cluster-focused Qwen3-14B QLoRA adapter path lives in `qwen-3-14b-qlora-sft/`, targeting a single 24 GB CUDA GPU with adapter-only output and W&B logging.
 - The RTX 3090 cluster environment has been prepared for the 14B path: dependencies installed, official Qwen3-14B weights cached, tests passing, and smoke train/inference completed.
-- Broader checkpoint evaluation artifacts and the future frontend are still pending in this wrapper repo.
+- A local dataset curation and pipeline studio now lives in `nextjs-frontend/`, with versioned extraction, separate human and Codex-assisted review, reversible transformations, balancing, deterministic splits, and privacy-safe exports.
 
 ## Cloning
 Clone recursively so `nanochat/` is populated:
@@ -39,7 +39,7 @@ git submodule update --init --recursive
 4. Review outputs and privacy-sensitive samples, including any extraction stats printed by the converter. This is a manual workflow today, not a finished review toolchain.
 5. Export final nanochat-compatible JSONL files into `training-data/final/`. The directory exists, but no checked-in dataset artifact is included in this repo.
 6. Use either the historical `qwen-3-0.6b-sft/` experiment or the cluster-focused `qwen-3-14b-qlora-sft/` experiment to train and run a personal reply-style model.
-7. Keep qualitative evaluation notes and future interface work downstream of the training loop.
+7. Run the local Dataset Studio from `nextjs-frontend/` to review, transform, balance, split, and export versioned training artifacts.
 
 ## Current Layout
 - `project_plan.md`: high-level roadmap and project vision
@@ -49,4 +49,4 @@ git submodule update --init --recursive
 - `qwen-3-0.6b-sft/`: historical Qwen3-0.6B full fine-tune experiment for smaller local hardware
 - `qwen-3-14b-qlora-sft/`: Qwen3-14B QLoRA adapter experiment for the RTX 3090 cluster
 - `evaluation-prompts/`: fixed prompts and notes for checkpoint evaluation
-- `nextjs-frontend/`: reserved for a later lightweight interface
+- `nextjs-frontend/`: local-only dataset curation and pipeline studio
